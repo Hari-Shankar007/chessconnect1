@@ -132,7 +132,7 @@ export default function CoachDashboard() {
       <header className="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-3">
         <div className="flex items-center gap-2">
           <img
-            src="/Black_White_Minimalist_Square_Frame_Fashion_Custom_Tailor_Logo.png"
+            src={`${import.meta.env.BASE_URL}Black_White_Minimalist_Square_Frame_Fashion_Custom_Tailor_Logo.png`}
             alt="EduChess"
             className="h-9 w-9 rounded-lg object-contain bg-emerald-600 p-0.5"
             style={{ filter: "invert(1)" }}
