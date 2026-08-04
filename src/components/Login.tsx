@@ -74,7 +74,7 @@ export default function Login() {
         <div className="mb-8 text-center">
           <div className="mx-auto mb-3 flex h-16 w-16 items-center justify-center rounded-2xl bg-emerald-500 shadow-lg shadow-emerald-500/30">
             <img
-              src="/Black_White_Minimalist_Square_Frame_Fashion_Custom_Tailor_Logo.png"
+             src={`${import.meta.env.BASE_URL}Black_White_Minimalist_Square_Frame_Fashion_Custom_Tailor_Logo.png`}
               alt="EduChess"
               className="h-12 w-12 object-contain"
               style={{ filter: "invert(1)" }}
