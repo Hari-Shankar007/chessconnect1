@@ -115,12 +115,15 @@ function RatingTab({ studentId }: { studentId: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rating, setRating] = useState("");
-  const [month, setMonth] = useState(new Date().toISOString().slice(0, 7)); // YYYY-MM
+  const [period, setPeriod] = useState<"weekly" | "monthly">("monthly");
+  const [month, setMonth] = useState(new Date().toISOString().slice(0, 7)); // YYYY-MM for monthly
+  const [weekDate, setWeekDate] = useState(new Date().toISOString().slice(0, 10)); // YYYY-MM-DD for weekly
+  const [viewMode, setViewMode] = useState<"weekly" | "monthly">("monthly");
 
   const load = useCallback(async () => {
     const { data } = await supabase
       .from("rating_entries")
-      .select("id, student_id, rating, month, created_at, created_by")
+      .select("id, student_id, rating, month, period, created_at, created_by")
       .eq("student_id", studentId)
       .order("month", { ascending: true });
     setEntries((data as RatingEntry[]) || []);
@@ -134,13 +137,16 @@ function RatingTab({ studentId }: { studentId: string }) {
 
   async function add(e: React.FormEvent) {
     e.preventDefault();
-    if (!rating || !month) return;
+    if (!rating) return;
     setBusy(true);
     setError(null);
-    const monthDate = `${month}-01`;
+    const dateStr = period === "monthly" ? `${month}-01` : weekDate;
     const { error } = await supabase
       .from("rating_entries")
-      .upsert({ student_id: studentId, rating: parseInt(rating, 10), month: monthDate }, { onConflict: "student_id,month" });
+      .upsert(
+        { student_id: studentId, rating: parseInt(rating, 10), month: dateStr, period },
+        { onConflict: "student_id,month,period" }
+      );
     if (error) setError(error.message);
     else { setRating(""); }
     setBusy(false);
@@ -154,23 +160,84 @@ function RatingTab({ studentId }: { studentId: string }) {
 
   if (loading) return <Spinner />;
 
+  const visibleEntries = entries.filter((e) => e.period === viewMode);
+
   return (
     <div className="space-y-5">
+      {/* View toggle */}
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-medium text-slate-500">View:</span>
+        <div className="flex rounded-lg border border-slate-200 bg-slate-50 p-0.5">
+          <button
+            onClick={() => setViewMode("monthly")}
+            className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${
+              viewMode === "monthly" ? "bg-white text-emerald-700 shadow-sm" : "text-slate-500 hover:text-slate-700"
+            }`}
+          >
+            Monthly
+          </button>
+          <button
+            onClick={() => setViewMode("weekly")}
+            className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${
+              viewMode === "weekly" ? "bg-white text-emerald-700 shadow-sm" : "text-slate-500 hover:text-slate-700"
+            }`}
+          >
+            Weekly
+          </button>
+        </div>
+      </div>
+
       {/* Graph */}
-      <RatingGraph entries={entries} />
+      <RatingGraph entries={visibleEntries} period={viewMode} />
 
       {/* Add form */}
       <form onSubmit={add} className="flex flex-wrap items-end gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-500">Month</label>
-          <input
-            type="month"
-            value={month}
-            onChange={(e) => setMonth(e.target.value)}
-            required
-            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100"
-          />
+          <label className="mb-1 block text-xs font-medium text-slate-500">Period</label>
+          <div className="flex rounded-lg border border-slate-200 bg-white p-0.5">
+            <button
+              type="button"
+              onClick={() => setPeriod("monthly")}
+              className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${
+                period === "monthly" ? "bg-emerald-600 text-white" : "text-slate-500 hover:text-slate-700"
+              }`}
+            >
+              Monthly
+            </button>
+            <button
+              type="button"
+              onClick={() => setPeriod("weekly")}
+              className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${
+                period === "weekly" ? "bg-emerald-600 text-white" : "text-slate-500 hover:text-slate-700"
+              }`}
+            >
+              Weekly
+            </button>
+          </div>
         </div>
+        {period === "monthly" ? (
+          <div>
+            <label className="mb-1 block text-xs font-medium text-slate-500">Month</label>
+            <input
+              type="month"
+              value={month}
+              onChange={(e) => setMonth(e.target.value)}
+              required
+              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100"
+            />
+          </div>
+        ) : (
+          <div>
+            <label className="mb-1 block text-xs font-medium text-slate-500">Week starting (Monday)</label>
+            <input
+              type="date"
+              value={weekDate}
+              onChange={(e) => setWeekDate(e.target.value)}
+              required
+              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100"
+            />
+          </div>
+        )}
         <div>
           <label className="mb-1 block text-xs font-medium text-slate-500">Rating</label>
           <input
@@ -194,14 +261,21 @@ function RatingTab({ studentId }: { studentId: string }) {
       </form>
 
       {/* List */}
-      {entries.length === 0 ? (
-        <p className="py-6 text-center text-sm text-slate-400">No ratings logged yet.</p>
+      {visibleEntries.length === 0 ? (
+        <p className="py-6 text-center text-sm text-slate-400">
+          No {viewMode} ratings logged yet.
+        </p>
       ) : (
         <div className="space-y-2">
-          {entries.map((e) => (
+          {visibleEntries.map((e) => (
             <div key={e.id} className="flex items-center justify-between rounded-lg border border-slate-200 px-4 py-2.5">
               <div className="flex items-center gap-3">
-                <span className="text-sm text-slate-500">{formatMonth(e.month)}</span>
+                <span className="rounded-md bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">
+                  {e.period === "weekly" ? "Weekly" : "Monthly"}
+                </span>
+                <span className="text-sm text-slate-500">
+                  {e.period === "weekly" ? formatWeek(e.month) : formatMonth(e.month)}
+                </span>
                 <span className="font-semibold text-slate-800">{e.rating}</span>
               </div>
               <button
@@ -218,11 +292,11 @@ function RatingTab({ studentId }: { studentId: string }) {
   );
 }
 
-function RatingGraph({ entries }: { entries: RatingEntry[] }) {
+function RatingGraph({ entries, period }: { entries: RatingEntry[]; period: "weekly" | "monthly" }) {
   if (entries.length === 0) {
     return (
       <div className="flex h-48 items-center justify-center rounded-xl border border-dashed border-slate-300 text-sm text-slate-400">
-        Rating graph will appear here once you log ratings.
+        Rating graph will appear here once you log {period} ratings.
       </div>
     );
   }
@@ -260,6 +334,9 @@ function RatingGraph({ entries }: { entries: RatingEntry[] }) {
   const yTicks = 4;
   const tickVals = Array.from({ length: yTicks + 1 }, (_, i) => Math.round(yMin + (yRange * i) / yTicks));
 
+  // X-axis labels: show fewer labels if there are many points
+  const labelStep = Math.max(1, Math.ceil(entries.length / 8));
+
   return (
     <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white p-4">
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ minWidth: 400 }}>
@@ -282,9 +359,11 @@ function RatingGraph({ entries }: { entries: RatingEntry[] }) {
         {points.map((p, i) => (
           <g key={i}>
             <circle cx={p.x} cy={p.y} r={4} fill="#10b981" stroke="white" strokeWidth={2} />
-            <text x={p.x} y={H - padB + 16} textAnchor="middle" className="fill-slate-500 text-[10px]">
-              {formatMonthShort(p.month)}
-            </text>
+            {i % labelStep === 0 && (
+              <text x={p.x} y={H - padB + 16} textAnchor="middle" className="fill-slate-500 text-[10px]">
+                {period === "weekly" ? formatWeekShort(p.month) : formatMonthShort(p.month)}
+              </text>
+            )}
             <text x={p.x} y={p.y - 10} textAnchor="middle" className="fill-slate-700 text-[10px] font-semibold">
               {p.rating}
             </text>
@@ -704,6 +783,16 @@ function formatMonth(iso: string): string {
 function formatMonthShort(iso: string): string {
   const d = new Date(iso);
   return d.toLocaleDateString([], { month: "short" });
+}
+
+function formatWeek(iso: string): string {
+  const d = new Date(iso);
+  return d.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+function formatWeekShort(iso: string): string {
+  const d = new Date(iso);
+  return d.toLocaleDateString([], { month: "numeric", day: "numeric" });
 }
 
 function formatDate(iso: string): string {

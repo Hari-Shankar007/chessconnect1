@@ -24,7 +24,7 @@ export default function StudentPerformance() {
 
   const load = useCallback(async () => {
     const [r, w, g, t] = await Promise.all([
-      supabase.from("rating_entries").select("id, student_id, rating, month, created_at, created_by").eq("student_id", studentId).order("month", { ascending: true }),
+      supabase.from("rating_entries").select("id, student_id, rating, month, period, created_at, created_by").eq("student_id", studentId).order("month", { ascending: true }),
       supabase.from("worksheets").select("id, student_id, title, completed, assigned_at, deadline, created_at, created_by").eq("student_id", studentId).order("assigned_at", { ascending: false }),
       supabase.from("games_played").select("id, student_id, count, month, created_at, created_by").eq("student_id", studentId).order("month", { ascending: false }),
       supabase.from("tournament_participation").select("id, student_id, tournament_id, title, played_at, created_at, created_by").eq("student_id", studentId).order("played_at", { ascending: false }),
@@ -117,7 +117,7 @@ export default function StudentPerformance() {
 
       {/* Rating graph */}
       <Section title="Rating Progress" icon={<TrendingUp className="h-4 w-4 text-emerald-600" />}>
-        <RatingGraph entries={ratings} />
+        <StudentRatingGraph entries={ratings} />
       </Section>
 
       {/* Worksheets */}
@@ -219,11 +219,45 @@ function StatCard({ label, value, icon, color }: { label: string; value: number 
   );
 }
 
-function RatingGraph({ entries }: { entries: RatingEntry[] }) {
+function StudentRatingGraph({ entries }: { entries: RatingEntry[] }) {
+  const [viewMode, setViewMode] = useState<"weekly" | "monthly">("monthly");
+  const visible = entries.filter((e) => e.period === viewMode);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-medium text-slate-500">View:</span>
+        <div className="flex rounded-lg border border-slate-200 bg-slate-50 p-0.5">
+          <button
+            onClick={() => setViewMode("monthly")}
+            className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${
+              viewMode === "monthly" ? "bg-white text-emerald-700 shadow-sm" : "text-slate-500 hover:text-slate-700"
+            }`}
+          >
+            Monthly
+          </button>
+          <button
+            onClick={() => setViewMode("weekly")}
+            className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${
+              viewMode === "weekly" ? "bg-white text-emerald-700 shadow-sm" : "text-slate-500 hover:text-slate-700"
+            }`}
+          >
+            Weekly
+          </button>
+        </div>
+      </div>
+      <RatingGraph entries={visible} period={viewMode} />
+    </div>
+  );
+}
+
+function RatingGraph({ entries, period }: { entries: RatingEntry[]; period: "weekly" | "monthly" }) {
   if (entries.length === 0) {
     return (
       <div className="flex h-48 items-center justify-center rounded-xl border border-dashed border-slate-300 text-sm text-slate-400">
-        Your coach hasn't logged any ratings yet.
+        {period === "weekly"
+          ? "Your coach hasn't logged any weekly ratings yet."
+          : "Your coach hasn't logged any monthly ratings yet."}
       </div>
     );
   }
@@ -258,6 +292,8 @@ function RatingGraph({ entries }: { entries: RatingEntry[] }) {
   const yTicks = 4;
   const tickVals = Array.from({ length: yTicks + 1 }, (_, i) => Math.round(yMin + (yRange * i) / yTicks));
 
+  const labelStep = Math.max(1, Math.ceil(entries.length / 8));
+
   return (
     <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white p-4">
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ minWidth: 400 }}>
@@ -275,9 +311,11 @@ function RatingGraph({ entries }: { entries: RatingEntry[] }) {
         {points.map((p, i) => (
           <g key={i}>
             <circle cx={p.x} cy={p.y} r={4} fill="#10b981" stroke="white" strokeWidth={2} />
-            <text x={p.x} y={H - padB + 16} textAnchor="middle" className="fill-slate-500 text-[10px]">
-              {fmtMonthShort(p.month)}
-            </text>
+            {i % labelStep === 0 && (
+              <text x={p.x} y={H - padB + 16} textAnchor="middle" className="fill-slate-500 text-[10px]">
+                {period === "weekly" ? fmtWeekShort(p.month) : fmtMonthShort(p.month)}
+              </text>
+            )}
             <text x={p.x} y={p.y - 10} textAnchor="middle" className="fill-slate-700 text-[10px] font-semibold">
               {p.rating}
             </text>
@@ -293,6 +331,9 @@ function fmtMonth(iso: string): string {
 }
 function fmtMonthShort(iso: string): string {
   return new Date(iso).toLocaleDateString([], { month: "short" });
+}
+function fmtWeekShort(iso: string): string {
+  return new Date(iso).toLocaleDateString([], { month: "numeric", day: "numeric" });
 }
 function fmtDate(iso: string): string {
   return new Date(iso).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });

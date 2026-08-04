@@ -63,6 +63,7 @@ export interface RatingEntry {
   student_id: string;
   rating: number;
   month: string;
+  period: "weekly" | "monthly";
   created_at: string;
   created_by: string;
 }
