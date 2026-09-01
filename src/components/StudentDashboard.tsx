@@ -1,9 +1,22 @@
+
 import { useEffect, useRef, useState } from "react";
-import { LogOut, Loader2, MessageSquare, BookOpen, Trophy, TrendingUp } from "lucide-react";
+import {
+  LogOut,
+  Loader2,
+  MessageSquare,
+  BookOpen,
+  Trophy,
+  TrendingUp,
+} from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { supabase } from "@/lib/supabase";
 import { Chat, CallSignaling, CallType } from "@/lib/types";
-import { ensureNotificationPermission, showBrowserNotification, playNotificationSound } from "@/lib/notifications";
+import {
+  ensureNotificationPermission,
+  registerPushNotifications,
+  showBrowserNotification,
+  playNotificationSound,
+} from "@/lib/notifications";
 import ChatWindow from "./ChatWindow";
 import StudentArticles from "./StudentArticles";
 import StudentTournaments from "./StudentTournaments";
@@ -25,15 +38,33 @@ export default function StudentDashboard() {
   const coachNameRef = useRef<string>("Coach");
 
   // Call state
-  const [callState, setCallState] = useState<{ chatId: string; theirId: string; theirName: string; type: CallType; isCaller: boolean } | null>(null);
-  const [incomingCall, setIncomingCall] = useState<CallSignaling | null>(null);
+  const [callState, setCallState] = useState<{
+    chatId: string;
+    theirId: string;
+    theirName: string;
+    type: CallType;
+    isCaller: boolean;
+  } | null>(null);
+
+  const [incomingCall, setIncomingCall] =
+    useState<CallSignaling | null>(null);
 
   function startCall(type: CallType) {
     if (!chat || !profile) return;
-    setCallState({ chatId: chat.id, theirId: chat.coach_id, theirName: coachName, type, isCaller: true });
+
+    setCallState({
+      chatId: chat.id,
+      theirId: chat.coach_id,
+      theirName: coachName,
+      type,
+      isCaller: true,
+    });
   }
 
-  // Listen for incoming calls
+  // ============================================================
+  // LISTEN FOR INCOMING CALLS
+  // ============================================================
+
   useEffect(() => {
     if (!profile) return;
 
@@ -42,7 +73,9 @@ export default function StudentDashboard() {
     // Initial fetch to establish baseline
     supabase
       .from("call_signaling")
-      .select("id, chat_id, caller_id, callee_id, call_type, status, sdp_offer, sdp_answer, caller_ice, callee_ice, created_at, updated_at")
+      .select(
+        "id, chat_id, caller_id, callee_id, call_type, status, sdp_offer, sdp_answer, caller_ice, callee_ice, created_at, updated_at"
+      )
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle()
@@ -55,14 +88,38 @@ export default function StudentDashboard() {
       .channel("student-incoming-calls")
       .on(
         "postgres_changes",
-        { event: "INSERT", schema: "public", table: "call_signaling" },
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "call_signaling",
+        },
         (payload) => {
           const row = payload.new as CallSignaling;
-          if (row.callee_id !== profile.id || row.status !== "ringing") return;
+
+          if (
+            row.callee_id !== profile.id ||
+            row.status !== "ringing"
+          ) {
+            return;
+          }
+
           setIncomingCall(row);
-          setCallState({ chatId: row.chat_id, theirId: row.caller_id, theirName: coachNameRef.current, type: row.call_type, isCaller: false });
+
+          setCallState({
+            chatId: row.chat_id,
+            theirId: row.caller_id,
+            theirName: coachNameRef.current,
+            type: row.call_type,
+            isCaller: false,
+          });
+
           playNotificationSound();
-          showBrowserNotification(`Incoming ${row.call_type} call`, `${coachNameRef.current} is calling…`, () => {});
+
+          showBrowserNotification(
+            `Incoming ${row.call_type} call`,
+            `${coachNameRef.current} is calling…`,
+            () => {}
+          );
         }
       )
       .subscribe();
@@ -70,11 +127,16 @@ export default function StudentDashboard() {
     // Polling fallback — check for incoming calls every 2 seconds
     const pollInterval = setInterval(async () => {
       if (callState) return;
-      const cutoff = new Date(Date.now() - 45 * 1000).toISOString();
+
+      const cutoff = new Date(
+        Date.now() - 45 * 1000
+      ).toISOString();
 
       const { data } = await supabase
         .from("call_signaling")
-        .select("id, chat_id, caller_id, callee_id, call_type, status, sdp_offer, sdp_answer, caller_ice, callee_ice, created_at, updated_at")
+        .select(
+          "id, chat_id, caller_id, callee_id, call_type, status, sdp_offer, sdp_answer, caller_ice, callee_ice, created_at, updated_at"
+        )
         .eq("callee_id", profile.id)
         .eq("status", "ringing")
         .gt("created_at", cutoff)
@@ -84,12 +146,27 @@ export default function StudentDashboard() {
 
       if (data) {
         const row = data as CallSignaling;
+
         if (row.id !== lastSeenId) {
           lastSeenId = row.id;
+
           setIncomingCall(row);
-          setCallState({ chatId: row.chat_id, theirId: row.caller_id, theirName: coachNameRef.current, type: row.call_type, isCaller: false });
+
+          setCallState({
+            chatId: row.chat_id,
+            theirId: row.caller_id,
+            theirName: coachNameRef.current,
+            type: row.call_type,
+            isCaller: false,
+          });
+
           playNotificationSound();
-          showBrowserNotification(`Incoming ${row.call_type} call`, `${coachNameRef.current} is calling…`, () => {});
+
+          showBrowserNotification(
+            `Incoming ${row.call_type} call`,
+            `${coachNameRef.current} is calling…`,
+            () => {}
+          );
         }
       }
     }, 2000);
@@ -105,9 +182,14 @@ export default function StudentDashboard() {
     setIncomingCall(null);
   }
 
+  // ============================================================
+  // LOAD CHAT + COACH
+  // ============================================================
+
   useEffect(() => {
     async function load() {
       if (!profile) return;
+
       const { data, error } = await supabase
         .from("chats")
         .select("id, student_id, coach_id, created_at")
@@ -120,6 +202,7 @@ export default function StudentDashboard() {
         setLoading(false);
         return;
       }
+
       setChat(data as Chat);
       chatIdRef.current = (data as Chat).id;
 
@@ -128,44 +211,112 @@ export default function StudentDashboard() {
         .select("name")
         .eq("id", (data as Chat).coach_id)
         .maybeSingle();
+
       setCoachName(coach?.name || "Coach");
       coachNameRef.current = coach?.name || "Coach";
+
       setLoading(false);
     }
+
     load();
   }, [profile]);
 
-  // Request notification permission on mount
+  // ============================================================
+  // PUSH NOTIFICATION SETUP
+  // ============================================================
+
   useEffect(() => {
-    ensureNotificationPermission();
+    async function setupPushNotifications() {
+      // First request normal browser notification permission
+      const permissionGranted =
+        await ensureNotificationPermission();
+
+      if (!permissionGranted) {
+        console.log(
+          "[ChessConnect] Notification permission not granted."
+        );
+        return;
+      }
+
+      // Create / retrieve the Web Push subscription
+      const subscription =
+        await registerPushNotifications();
+
+      if (subscription) {
+        console.log(
+          "[ChessConnect] Push subscription ready:",
+          subscription.endpoint
+        );
+
+        // The next step will save this subscription
+        // to Supabase for this logged-in user.
+      }
+    }
+
+    setupPushNotifications();
   }, []);
 
-  // Realtime: listen for incoming messages from coach
+  // ============================================================
+  // REALTIME: INCOMING MESSAGES
+  // ============================================================
+
   useEffect(() => {
     if (!profile || !chatIdRef.current) return;
+
     const cid = chatIdRef.current;
 
     const channel = supabase
       .channel("student-notifications")
       .on(
         "postgres_changes",
-        { event: "INSERT", schema: "public", table: "messages", filter: `chat_id=eq.${cid}` },
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "messages",
+          filter: `chat_id=eq.${cid}`,
+        },
         (payload) => {
-          const msg = payload.new as { sender_id: string; content: string | null; file_type: string | null };
-          // Only notify for messages from coach (not our own)
+          const msg = payload.new as {
+            sender_id: string;
+            content: string | null;
+            file_type: string | null;
+          };
+
+          // Only notify for messages from coach
           if (msg.sender_id === profile.id) return;
 
-          const preview = msg.content || (msg.file_type ? `Sent a ${msg.file_type}` : "New message");
+          const preview =
+            msg.content ||
+            (msg.file_type
+              ? `Sent a ${msg.file_type}`
+              : "New message");
 
-          // If chat tab is active and page is visible, don't notify
-          if (tab === "chat" && document.visibilityState === "visible") return;
+          // If chat tab is active and page is visible,
+          // don't create another notification.
+          if (
+            tab === "chat" &&
+            document.visibilityState === "visible"
+          ) {
+            return;
+          }
 
           setUnread((n) => n + 1);
-          setToast({ name: coachNameRef.current, message: preview, chatId: cid });
-          playNotificationSound();
-          showBrowserNotification(`New message from ${coachNameRef.current}`, preview, () => {
-            setTab("chat");
+
+          setToast({
+            name: coachNameRef.current,
+            message: preview,
+            chatId: cid,
           });
+
+          playNotificationSound();
+
+          showBrowserNotification(
+            `New message from ${coachNameRef.current}`,
+            preview,
+            () => {
+              setTab("chat");
+            }
+          );
         }
       )
       .subscribe();
@@ -174,6 +325,10 @@ export default function StudentDashboard() {
       supabase.removeChannel(channel);
     };
   }, [profile, tab]);
+
+  // ============================================================
+  // UI
+  // ============================================================
 
   return (
     <div className="flex h-screen flex-col bg-slate-100">
@@ -186,22 +341,58 @@ export default function StudentDashboard() {
             className="h-9 w-9 rounded-lg object-contain bg-emerald-600 p-0.5"
             style={{ filter: "invert(1)" }}
           />
-          <span className="font-bold text-slate-800">EduChess</span>
+
+          <span className="font-bold text-slate-800">
+            EduChess
+          </span>
         </div>
 
         {/* Tab navigation */}
         <div className="flex items-center gap-1 rounded-full bg-slate-100 p-1">
-          <TabBtn active={tab === "chat"} onClick={() => { setTab("chat"); setUnread(0); }} icon={<MessageSquare className="h-4 w-4" />} label="Chat" badge={unread} />
-          <TabBtn active={tab === "articles"} onClick={() => setTab("articles")} icon={<BookOpen className="h-4 w-4" />} label="Articles" />
-          <TabBtn active={tab === "tournaments"} onClick={() => setTab("tournaments")} icon={<Trophy className="h-4 w-4" />} label="Tournaments" />
-          <TabBtn active={tab === "performance"} onClick={() => setTab("performance")} icon={<TrendingUp className="h-4 w-4" />} label="Performance" />
+          <TabBtn
+            active={tab === "chat"}
+            onClick={() => {
+              setTab("chat");
+              setUnread(0);
+            }}
+            icon={<MessageSquare className="h-4 w-4" />}
+            label="Chat"
+            badge={unread}
+          />
+
+          <TabBtn
+            active={tab === "articles"}
+            onClick={() => setTab("articles")}
+            icon={<BookOpen className="h-4 w-4" />}
+            label="Articles"
+          />
+
+          <TabBtn
+            active={tab === "tournaments"}
+            onClick={() => setTab("tournaments")}
+            icon={<Trophy className="h-4 w-4" />}
+            label="Tournaments"
+          />
+
+          <TabBtn
+            active={tab === "performance"}
+            onClick={() => setTab("performance")}
+            icon={<TrendingUp className="h-4 w-4" />}
+            label="Performance"
+          />
         </div>
 
         <div className="flex items-center gap-3">
           <div className="text-right">
-            <p className="hidden text-sm font-medium text-slate-700 sm:block">{profile?.name}</p>
-            <p className="hidden text-xs text-emerald-600 sm:block">Student</p>
+            <p className="hidden text-sm font-medium text-slate-700 sm:block">
+              {profile?.name}
+            </p>
+
+            <p className="hidden text-xs text-emerald-600 sm:block">
+              Student
+            </p>
           </div>
+
           <button
             onClick={signOut}
             className="flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
@@ -216,11 +407,14 @@ export default function StudentDashboard() {
       <div className="flex flex-1 overflow-hidden">
         {tab === "chat" && (
           <>
-            {/* Sidebar (hidden on mobile) */}
+            {/* Sidebar */}
             <aside className="hidden w-72 shrink-0 flex-col border-r border-slate-200 bg-white md:flex">
               <div className="border-b border-slate-100 px-4 py-3">
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Your Coach</p>
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                  Your Coach
+                </p>
               </div>
+
               {loading ? (
                 <div className="flex items-center justify-center py-10">
                   <Loader2 className="h-5 w-5 animate-spin text-slate-400" />
@@ -230,15 +424,22 @@ export default function StudentDashboard() {
                   <div className="flex h-11 w-11 items-center justify-center rounded-full bg-emerald-100 text-sm font-semibold text-emerald-700">
                     {coachName.slice(0, 2).toUpperCase()}
                   </div>
+
                   <div className="min-w-0">
-                    <p className="truncate font-medium text-slate-800">{coachName}</p>
+                    <p className="truncate font-medium text-slate-800">
+                      {coachName}
+                    </p>
+
                     <p className="flex items-center gap-1 text-xs text-slate-400">
-                      <MessageSquare className="h-3 w-3" /> Active conversation
+                      <MessageSquare className="h-3 w-3" />
+                      Active conversation
                     </p>
                   </div>
                 </div>
               ) : (
-                <p className="px-4 py-6 text-sm text-slate-400">No chat assigned yet.</p>
+                <p className="px-4 py-6 text-sm text-slate-400">
+                  No chat assigned yet.
+                </p>
               )}
             </aside>
 
@@ -249,13 +450,25 @@ export default function StudentDashboard() {
                   <Loader2 className="h-8 w-8 animate-spin text-slate-400" />
                 </div>
               ) : chat ? (
-                <ChatWindow chatId={chat.id} myId={profile!.id} theirName={coachName} theirId={chat.coach_id} onStartCall={startCall} />
+                <ChatWindow
+                  chatId={chat.id}
+                  myId={profile!.id}
+                  theirName={coachName}
+                  theirId={chat.coach_id}
+                  onStartCall={startCall}
+                />
               ) : (
                 <div className="flex h-full items-center justify-center p-6 text-center">
                   <div>
                     <MessageSquare className="mx-auto mb-3 h-10 w-10 text-slate-300" />
-                    <p className="text-slate-500">You don't have a coach assigned yet.</p>
-                    <p className="text-sm text-slate-400">Please ask your academy admin to assign one.</p>
+
+                    <p className="text-slate-500">
+                      You don't have a coach assigned yet.
+                    </p>
+
+                    <p className="text-sm text-slate-400">
+                      Please ask your academy admin to assign one.
+                    </p>
                   </div>
                 </div>
               )}
@@ -267,8 +480,10 @@ export default function StudentDashboard() {
           <main className="flex-1 overflow-y-auto p-4 sm:p-6">
             <div className="mx-auto max-w-3xl">
               <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-slate-800">
-                <BookOpen className="h-5 w-5 text-emerald-600" /> Articles from your coach
+                <BookOpen className="h-5 w-5 text-emerald-600" />
+                Articles from your coach
               </h2>
+
               <StudentArticles />
             </div>
           </main>
@@ -278,11 +493,14 @@ export default function StudentDashboard() {
           <main className="flex-1 overflow-y-auto p-4 sm:p-6">
             <div className="mx-auto max-w-3xl">
               <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-slate-800">
-                <Trophy className="h-5 w-5 text-amber-600" /> Tournament Calendar
+                <Trophy className="h-5 w-5 text-amber-600" />
+                Tournament Calendar
               </h2>
+
               <p className="mb-4 text-sm text-slate-500">
                 Times are shown in your local timezone. Click a tournament to join.
               </p>
+
               <StudentTournaments />
             </div>
           </main>
@@ -292,14 +510,17 @@ export default function StudentDashboard() {
           <main className="flex-1 overflow-y-auto p-4 sm:p-6">
             <div className="mx-auto max-w-3xl">
               <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-slate-800">
-                <TrendingUp className="h-5 w-5 text-emerald-600" /> My Performance
+                <TrendingUp className="h-5 w-5 text-emerald-600" />
+                My Performance
               </h2>
+
               <StudentPerformance />
             </div>
           </main>
         )}
       </div>
 
+      {/* Call modal */}
       {callState && (
         <CallModal
           callId={null}
@@ -315,21 +536,52 @@ export default function StudentDashboard() {
         />
       )}
 
-      <MessageToast toast={toast} onDismiss={() => setToast(null)} onClick={() => { setTab("chat"); setUnread(0); setToast(null); }} />
+      <MessageToast
+        toast={toast}
+        onDismiss={() => setToast(null)}
+        onClick={() => {
+          setTab("chat");
+          setUnread(0);
+          setToast(null);
+        }}
+      />
     </div>
   );
 }
 
-function TabBtn({ active, onClick, icon, label, badge }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string; badge?: number }) {
+
+// ============================================================
+// TAB BUTTON
+// ============================================================
+
+function TabBtn({
+  active,
+  onClick,
+  icon,
+  label,
+  badge,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
+  label: string;
+  badge?: number;
+}) {
   return (
     <button
       onClick={onClick}
       className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium transition ${
-        active ? "bg-white text-emerald-700 shadow-sm" : "text-slate-500 hover:text-slate-700"
+        active
+          ? "bg-white text-emerald-700 shadow-sm"
+          : "text-slate-500 hover:text-slate-700"
       }`}
     >
       {icon}
-      <span className="hidden sm:inline">{label}</span>
+
+      <span className="hidden sm:inline">
+        {label}
+      </span>
+
       {badge !== undefined && badge > 0 && (
         <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-emerald-600 px-1.5 text-xs font-bold text-white">
           {badge}
@@ -338,3 +590,4 @@ function TabBtn({ active, onClick, icon, label, badge }: { active: boolean; onCl
     </button>
   );
 }
+
