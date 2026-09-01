@@ -1,21 +1,28 @@
+
 // ============================================================
 // ChessConnect Push Notification Service Worker
 // ============================================================
 
-// Service worker installation
+// ============================================================
+// INSTALL
+// ============================================================
+
 self.addEventListener("install", (event) => {
   console.log("[ChessConnect SW] Installed");
 
-  // Activate immediately
-  self.skipWaiting();
+  // Activate immediately instead of waiting for old SW to finish
+  event.waitUntil(self.skipWaiting());
 });
 
 
-// Service worker activation
+// ============================================================
+// ACTIVATE
+// ============================================================
+
 self.addEventListener("activate", (event) => {
   console.log("[ChessConnect SW] Activated");
 
-  // Take control of existing pages immediately
+  // Take control of existing ChessConnect pages immediately
   event.waitUntil(self.clients.claim());
 });
 
@@ -35,9 +42,11 @@ self.addEventListener("push", (event) => {
     url: "/",
     tag: "chessconnect-notification",
     type: "message",
+    chatId: null,
+    senderId: null,
   };
 
-  // Read notification data sent by Supabase
+  // Read data sent by the push server / Supabase Edge Function
   if (event.data) {
     try {
       const incomingData = event.data.json();
@@ -48,21 +57,25 @@ self.addEventListener("push", (event) => {
       };
     } catch (error) {
       console.error(
-        "[ChessConnect SW] Could not read push data:",
+        "[ChessConnect SW] Could not read push JSON:",
         error
       );
 
-      // Try plain text as fallback
+      // Fallback to plain text
       try {
         data.body = event.data.text();
       } catch {
-        // Keep default message
+        // Keep default notification
       }
     }
   }
 
+  const isCall =
+    data.type === "call" ||
+    data.type === "video-call";
+
   const notificationOptions = {
-    body: data.body,
+    body: data.body || "You have a new notification.",
 
     icon:
       data.icon ||
@@ -74,12 +87,13 @@ self.addEventListener("push", (event) => {
 
     tag: data.tag || "chessconnect-notification",
 
+    // Allow another notification with the same tag to alert again
     renotify: true,
 
-    requireInteraction:
-      data.type === "call" ||
-      data.type === "video-call",
+    // Calls stay visible until the user interacts with them
+    requireInteraction: isCall,
 
+    // Store information so notificationclick can use it
     data: {
       url: data.url || "/",
       type: data.type || "message",
@@ -87,19 +101,19 @@ self.addEventListener("push", (event) => {
       senderId: data.senderId || null,
     },
 
-    actions:
-      data.type === "call" || data.type === "video-call"
-        ? [
-            {
-              action: "open",
-              title: "Answer",
-            },
-            {
-              action: "dismiss",
-              title: "Decline",
-            },
-          ]
-        : [],
+    // Call notifications get action buttons
+    actions: isCall
+      ? [
+          {
+            action: "open",
+            title: "Answer",
+          },
+          {
+            action: "dismiss",
+            title: "Decline",
+          },
+        ]
+      : [],
   };
 
   event.waitUntil(
@@ -122,46 +136,56 @@ self.addEventListener("notificationclick", (event) => {
   );
 
   const notification = event.notification;
-
   const notificationData = notification.data || {};
 
   const url = notificationData.url || "/";
 
-  // Close notification
+  // Close notification immediately
   notification.close();
 
-  // If user selected Decline
+  // ----------------------------------------------------------
+  // DECLINE
+  // ----------------------------------------------------------
+
   if (event.action === "dismiss") {
+    console.log("[ChessConnect SW] Notification dismissed");
     return;
   }
 
+  // ----------------------------------------------------------
+  // OPEN / ANSWER
+  // ----------------------------------------------------------
+
   event.waitUntil(
     (async () => {
-      // Find an already-open ChessConnect tab
       const clientList = await self.clients.matchAll({
         type: "window",
         includeUncontrolled: true,
       });
 
-      // Try to find an existing ChessConnect window
+      // Try to use an existing ChessConnect tab
       for (const client of clientList) {
         if ("focus" in client) {
           await client.focus();
 
-          // Send information to the React app
+          // Tell the React application what notification was clicked
           client.postMessage({
             type: "PUSH_NOTIFICATION_CLICK",
             notificationType: notificationData.type,
             chatId: notificationData.chatId,
             senderId: notificationData.senderId,
+            action: event.action || "open",
           });
 
           return;
         }
       }
 
-      // No ChessConnect tab is open.
-      // Open the website.
+      // --------------------------------------------------------
+      // No ChessConnect tab exists
+      // Open ChessConnect
+      // --------------------------------------------------------
+
       if (self.clients.openWindow) {
         await self.clients.openWindow(url);
       }
@@ -174,6 +198,7 @@ self.addEventListener("notificationclick", (event) => {
 // NOTIFICATION CLOSE
 // ============================================================
 
-self.addEventListener("notificationclose", (event) => {
+self.addEventListener("notificationclose", () => {
   console.log("[ChessConnect SW] Notification closed");
 });
+
