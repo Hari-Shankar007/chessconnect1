@@ -1,3 +1,4 @@
+
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App.tsx";
@@ -16,8 +17,12 @@ async function registerServiceWorker() {
   }
 
   try {
+    // Use Vite's configured base path.
+    // This works with both GitHub Pages and a custom domain.
+    const swUrl = `${import.meta.env.BASE_URL}sw.js`;
+
     const registration =
-      await navigator.serviceWorker.register("/sw.js");
+      await navigator.serviceWorker.register(swUrl);
 
     console.log(
       "[ChessConnect] Service worker registered:",
@@ -48,3 +53,4 @@ createRoot(document.getElementById("root")!).render(
     <App />
   </StrictMode>
 );
+
