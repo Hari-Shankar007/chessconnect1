@@ -1,4 +1,3 @@
-
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   LogOut,
@@ -20,6 +19,7 @@ import {
 } from "@/lib/utils";
 import {
   ensureNotificationPermission,
+  registerPushNotifications,
   showBrowserNotification,
   playNotificationSound,
 } from "@/lib/notifications";
@@ -347,10 +347,37 @@ export default function CoachDashboard() {
   }, [partners]);
 
   /*
-   * Request browser notification permission once.
+   * PUSH NOTIFICATION SETUP
    */
   useEffect(() => {
-    void ensureNotificationPermission();
+    async function setupPushNotifications() {
+      // First request normal browser notification permission
+      const permissionGranted =
+        await ensureNotificationPermission();
+
+      if (!permissionGranted) {
+        console.log(
+          "[ChessConnect] Notification permission not granted."
+        );
+        return;
+      }
+
+      // Create / retrieve the Web Push subscription
+      const subscription =
+        await registerPushNotifications();
+
+      if (subscription) {
+        console.log(
+          "[ChessConnect] Push subscription ready:",
+          subscription.endpoint
+        );
+
+        // The next step will save this subscription
+        // to Supabase for this logged-in coach.
+      }
+    }
+
+    setupPushNotifications();
   }, []);
 
   /*
@@ -754,4 +781,3 @@ export default function CoachDashboard() {
     </div>
   );
 }
-
