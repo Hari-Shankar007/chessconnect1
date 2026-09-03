@@ -2,33 +2,196 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ============================================================
+   BASIC APP SIZING
+   ============================================================ */
+
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 0;
+  min-height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+/*
+ * Prevent any component from making the whole page wider
+ * than the phone screen.
+ */
+html,
+body {
+  overflow-x: hidden;
+}
+
+/*
+ * Important for mobile browsers.
+ * 100dvh adjusts better when the browser address bar
+ * appears/disappears.
+ */
+#root {
+  min-height: 100dvh;
+}
+
+/* ============================================================
+   FLEX / MOBILE WIDTH FIX
+   ============================================================ */
+
+/*
+ * THIS IS THE IMPORTANT FIX.
+ *
+ * Flex children normally have min-width:auto.
+ * That can make the ChatWindow wider than the phone.
+ *
+ * Setting min-width:0 allows the chat to shrink correctly.
+ */
+main,
+aside,
+section,
+header,
+footer {
+  min-width: 0;
+}
+
+/*
+ * Prevent flex children from creating horizontal overflow.
+ */
+main,
+aside,
+section {
+  min-height: 0;
+}
+
+/* ============================================================
+   INPUT COMPONENTS
+   ============================================================ */
+
 @layer components {
   .input {
     @apply w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-800 outline-none transition focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100;
   }
+
   .btn-primary {
     @apply flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 py-3 font-medium text-white transition hover:bg-emerald-700 disabled:opacity-50;
   }
 }
 
+/* ============================================================
+   TOAST ANIMATION
+   ============================================================ */
+
 @keyframes slideIn {
-  from { transform: translateX(120%); opacity: 0; }
-  to { transform: translateX(0); opacity: 1; }
+  from {
+    transform: translateX(120%);
+    opacity: 0;
+  }
+
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
 }
+
 .animate-toast {
   animation: slideIn 0.3s ease-out;
 }
 
-/* Smooth scrollbars */
+/* ============================================================
+   MOBILE CHAT SAFETY
+   ============================================================ */
+
+/*
+ * Make sure images/videos/audio/etc. never force the
+ * page wider than the phone.
+ */
+img,
+video,
+audio,
+canvas,
+svg {
+  max-width: 100%;
+}
+
+/*
+ * Long text/URLs must be allowed to wrap.
+ */
+p,
+span,
+div {
+  overflow-wrap: break-word;
+}
+
+/*
+ * Textareas and inputs must never exceed their container.
+ */
+textarea,
+input,
+button {
+  max-width: 100%;
+}
+
+/* ============================================================
+   SAFE AREA FOR PHONES
+   ============================================================ */
+
+@supports (padding-bottom: env(safe-area-inset-bottom)) {
+  body {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* ============================================================
+   SMOOTH SCROLLBARS
+   ============================================================ */
+
 * {
   scrollbar-width: thin;
   scrollbar-color: #cbd5e1 transparent;
 }
+
 *::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
+
 *::-webkit-scrollbar-thumb {
   background-color: #cbd5e1;
   border-radius: 9999px;
+}
+
+/* ============================================================
+   MOBILE
+   ============================================================ */
+
+@media (max-width: 767px) {
+  /*
+   * Absolutely prevent horizontal page scrolling.
+   */
+  html,
+  body {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+
+  /*
+   * Make the application exactly fit the viewport.
+   */
+  #root {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    overflow-x: hidden;
+  }
+
+  /*
+   * Flex containers must be allowed to shrink.
+   */
+  main,
+  aside,
+  section {
+    min-width: 0 !important;
+    max-width: 100%;
+  }
 }
