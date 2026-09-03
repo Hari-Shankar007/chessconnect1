@@ -6,7 +6,11 @@ import {
   VideoOff,
   Mic,
   MicOff,
+  MonitorUp,
+  MonitorOff,
   Loader2,
+  Volume2,
+  Maximize2,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { CallSignaling, CallType } from "@/lib/types";
@@ -55,25 +59,34 @@ export default function CallModal({
 
   const [callId, setCallId] = useState<string | null>(propCallId);
   const [duration, setDuration] = useState(0);
+
   const [muted, setMuted] = useState(false);
   const [videoOff, setVideoOff] = useState(false);
+
+  const [screenSharing, setScreenSharing] = useState(false);
+  const [screenShareError, setScreenShareError] = useState<string | null>(
+    null
+  );
+
   const [error, setError] = useState<string | null>(null);
 
-  // Keep this declaration above every hook/effect that uses it.
-  // Declaring it near the bottom of the component causes a production
-  // "Cannot access before initialization" error after minification.
+  const [remoteVideoFullscreen, setRemoteVideoFullscreen] =
+    useState(false);
+
   const isVideo = callType === "video";
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
+
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
+
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const videoSenderRef = useRef<RTCRtpSender | null>(null);
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Incoming call ringtone. Place chess.mp3 in the public folder so it is
-  // available at /chess.mp3 in both development and GitHub Pages builds.
   const ringtoneRef = useRef<HTMLAudioElement | null>(null);
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -82,41 +95,30 @@ export default function CallModal({
 
   const endedRef = useRef(false);
 
-  // Prevent duplicate outgoing call creation.
   const outgoingStartedRef = useRef(false);
-
-  // Prevent duplicate answer application.
   const answerAppliedRef = useRef(false);
-
-  // Prevent duplicate accept setup.
   const acceptStartedRef = useRef(false);
-
-  // Prevent duplicate onEnd calls.
   const onEndCalledRef = useRef(false);
-
-  // Prevent duplicate active state/timer.
   const activeStartedRef = useRef(false);
 
-  // Latest callback.
   const onEndRef = useRef(onEnd);
   onEndRef.current = onEnd;
 
-  // Latest phase.
   const phaseRef = useRef<CallPhase>(phase);
   phaseRef.current = phase;
 
-  // Latest call type.
   const callTypeRef = useRef<CallType>(callType);
   callTypeRef.current = callType;
 
   /**
-   * Mark the call as active exactly once.
+   * Mark call active exactly once.
    */
   const markActive = useCallback(() => {
     if (endedRef.current) return;
     if (activeStartedRef.current) return;
 
     activeStartedRef.current = true;
+
     phaseRef.current = "active";
     setPhase("active");
 
@@ -128,9 +130,167 @@ export default function CallModal({
 
     timerRef.current = setInterval(() => {
       if (endedRef.current) return;
+
       setDuration((current) => current + 1);
     }, 1000);
   }, []);
+
+  /**
+   * Stop screen sharing and return to camera.
+   */
+  const stopScreenSharing = useCallback(async () => {
+    const pc = pcRef.current;
+    const cameraStream = localStreamRef.current;
+    const screenStream = screenStreamRef.current;
+
+    if (screenStream) {
+      screenStream.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch {
+          // Ignore track stop errors.
+        }
+      });
+    }
+
+    screenStreamRef.current = null;
+
+    if (pc && videoSenderRef.current && cameraStream) {
+      const cameraTrack = cameraStream.getVideoTracks()[0];
+
+      if (cameraTrack) {
+        try {
+          await videoSenderRef.current.replaceTrack(cameraTrack);
+        } catch (error) {
+          console.error(
+            "Failed to restore camera after screen sharing:",
+            error
+          );
+        }
+      }
+    }
+
+    setScreenSharing(false);
+    setScreenShareError(null);
+
+    const localVideo = localVideoRef.current;
+
+    if (localVideo && cameraStream) {
+      localVideo.srcObject = cameraStream;
+
+      localVideo.play().catch(() => {
+        // Ignore autoplay errors.
+      });
+    }
+  }, []);
+
+  /**
+   * Start Google Meet style screen sharing.
+   */
+  const startScreenSharing = useCallback(async () => {
+    if (!isVideo) return;
+    if (!pcRef.current) return;
+    if (!localStreamRef.current) return;
+    if (screenSharing) return;
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      setScreenShareError(
+        "Screen sharing is not supported by this browser."
+      );
+      return;
+    }
+
+    try {
+      setScreenShareError(null);
+
+      const screenStream =
+        await navigator.mediaDevices.getDisplayMedia({
+          video: {
+            frameRate: {
+              ideal: 30,
+              max: 60,
+            },
+          },
+          audio: true,
+        });
+
+      const screenTrack = screenStream.getVideoTracks()[0];
+
+      if (!screenTrack) {
+        screenStream.getTracks().forEach((track) => track.stop());
+
+        throw new Error("Could not get screen video track.");
+      }
+
+      const pc = pcRef.current;
+
+      let videoSender = videoSenderRef.current;
+
+      if (!videoSender) {
+        videoSender =
+          pc
+            .getSenders()
+            .find(
+              (sender) =>
+                sender.track?.kind === "video"
+            ) ?? null;
+
+        videoSenderRef.current = videoSender;
+      }
+
+      if (!videoSender) {
+        screenStream.getTracks().forEach((track) => track.stop());
+
+        throw new Error(
+          "Could not find the video connection."
+        );
+      }
+
+      await videoSender.replaceTrack(screenTrack);
+
+      screenStreamRef.current = screenStream;
+
+      setScreenSharing(true);
+
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = screenStream;
+
+        localVideoRef.current.play().catch(() => {
+          // Ignore autoplay errors.
+        });
+      }
+
+      /**
+       * Browser native Stop Sharing button.
+       */
+      screenTrack.onended = () => {
+        void stopScreenSharing();
+      };
+    } catch (error) {
+      console.error(
+        "Screen sharing failed:",
+        error
+      );
+
+      if (
+        error instanceof DOMException &&
+        error.name === "NotAllowedError"
+      ) {
+        setScreenShareError(
+          "Screen sharing was cancelled."
+        );
+      } else {
+        setScreenShareError(
+          "Could not start screen sharing."
+        );
+      }
+
+      setScreenSharing(false);
+    }
+  }, [
+    isVideo,
+    screenSharing,
+    stopScreenSharing,
+  ]);
 
   /**
    * Cleanup all WebRTC resources.
@@ -139,6 +299,20 @@ export default function CallModal({
     if (timerRef.current) {
       clearInterval(timerRef.current);
       timerRef.current = null;
+    }
+
+    if (screenStreamRef.current) {
+      screenStreamRef.current
+        .getTracks()
+        .forEach((track) => {
+          try {
+            track.stop();
+          } catch {
+            // Ignore track stop errors.
+          }
+        });
+
+      screenStreamRef.current = null;
     }
 
     if (pcRef.current) {
@@ -156,14 +330,18 @@ export default function CallModal({
       pcRef.current = null;
     }
 
+    videoSenderRef.current = null;
+
     if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((track) => {
-        try {
-          track.stop();
-        } catch {
-          // Ignore track stop errors.
-        }
-      });
+      localStreamRef.current
+        .getTracks()
+        .forEach((track) => {
+          try {
+            track.stop();
+          } catch {
+            // Ignore track stop errors.
+          }
+        });
 
       localStreamRef.current = null;
     }
@@ -184,28 +362,37 @@ export default function CallModal({
       remoteAudioRef.current.srcObject = null;
     }
 
-    // Always stop the ringtone when the call is cleaned up.
     if (ringtoneRef.current) {
       ringtoneRef.current.pause();
       ringtoneRef.current.currentTime = 0;
     }
+
+    setScreenSharing(false);
   }, []);
 
   /**
-   * Update a call row in Supabase.
+   * Update call row.
    */
   const updateCall = useCallback(
-    async (id: string, updates: Record<string, unknown>) => {
-      const { error: updateError } = await supabase
-        .from("call_signaling")
-        .update({
-          ...updates,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", id);
+    async (
+      id: string,
+      updates: Record<string, unknown>
+    ) => {
+      const { error: updateError } =
+        await supabase
+          .from("call_signaling")
+          .update({
+            ...updates,
+            updated_at:
+              new Date().toISOString(),
+          })
+          .eq("id", id);
 
       if (updateError) {
-        console.error("Failed to update call:", updateError);
+        console.error(
+          "Failed to update call:",
+          updateError
+        );
       }
     },
     []
@@ -216,15 +403,20 @@ export default function CallModal({
    */
   const endCall = useCallback(
     async (
-      reason: "ended" | "declined" | "missed" = "ended"
+      reason:
+        | "ended"
+        | "declined"
+        | "missed" = "ended"
     ) => {
       if (endedRef.current) return;
 
       endedRef.current = true;
+
       phaseRef.current = "ended";
       setPhase("ended");
 
-      const currentCallId = callIdRef.current;
+      const currentCallId =
+        callIdRef.current;
 
       if (currentCallId) {
         await updateCall(currentCallId, {
@@ -246,11 +438,14 @@ export default function CallModal({
   );
 
   /**
-   * Wait until ICE gathering has completed.
+   * Wait for ICE gathering.
    */
   const waitForIceGathering = useCallback(
     async (pc: RTCPeerConnection) => {
-      if (pc.iceGatheringState === "complete") {
+      if (
+        pc.iceGatheringState ===
+        "complete"
+      ) {
         return;
       }
 
@@ -271,7 +466,10 @@ export default function CallModal({
         };
 
         const checkState = () => {
-          if (pc.iceGatheringState === "complete") {
+          if (
+            pc.iceGatheringState ===
+            "complete"
+          ) {
             finish();
           }
         };
@@ -281,7 +479,6 @@ export default function CallModal({
           checkState
         );
 
-        // Never wait forever.
         setTimeout(finish, 5000);
       });
     },
@@ -289,7 +486,7 @@ export default function CallModal({
   );
 
   /**
-   * Convert Supabase ICE data into an array.
+   * Parse ICE candidates.
    */
   const parseIceCandidates = useCallback(
     (value: unknown): string[] => {
@@ -328,7 +525,7 @@ export default function CallModal({
   );
 
   /**
-   * Add remote ICE candidates safely.
+   * Add remote ICE candidates.
    */
   const addIceCandidates = useCallback(
     async (
@@ -343,7 +540,9 @@ export default function CallModal({
           const candidate =
             JSON.parse(candidateString);
 
-          await pc.addIceCandidate(candidate);
+          await pc.addIceCandidate(
+            candidate
+          );
         } catch (error) {
           console.warn(
             "Could not add remote ICE candidate:",
@@ -356,40 +555,46 @@ export default function CallModal({
   );
 
   /**
-   * Attach remote media.
-   *
-   * Keep the stream in a ref because the <video> element is only
-   * mounted after the call becomes active. Without this, ontrack can
-   * fire while the ref is still null and the remote video is lost.
+   * Attach remote stream.
    */
   const attachRemoteStream = useCallback(
     (stream: MediaStream) => {
       remoteStreamRef.current = stream;
 
-      if (callTypeRef.current === "video") {
-        const video = remoteVideoRef.current;
+      if (
+        callTypeRef.current === "video"
+      ) {
+        const video =
+          remoteVideoRef.current;
 
         if (video) {
           video.srcObject = stream;
 
           const playVideo = () => {
-            video.play().catch((error) => {
-              console.warn(
-                "Remote video autoplay/playback was blocked:",
-                error
-              );
-            });
+            video
+              .play()
+              .catch((error) => {
+                console.warn(
+                  "Remote video playback was blocked:",
+                  error
+                );
+              });
           };
 
-          if (video.readyState >= HTMLMediaElement.HAVE_METADATA) {
+          if (
+            video.readyState >=
+            HTMLMediaElement.HAVE_METADATA
+          ) {
             playVideo();
           } else {
-            video.onloadedmetadata = playVideo;
+            video.onloadedmetadata =
+              playVideo;
           }
         }
       } else {
         if (remoteAudioRef.current) {
-          remoteAudioRef.current.srcObject = stream;
+          remoteAudioRef.current.srcObject =
+            stream;
 
           remoteAudioRef.current
             .play()
@@ -403,437 +608,522 @@ export default function CallModal({
   );
 
   /**
-   * Configure WebRTC connection state handlers.
-   *
-   * This is attached directly after creating the peer
-   * connection, so it cannot miss the connected event.
+   * Configure connection handlers.
    */
-  const configureConnectionHandlers = useCallback(
-    (pc: RTCPeerConnection) => {
-      pc.onconnectionstatechange = () => {
-        const state = pc.connectionState;
+  const configureConnectionHandlers =
+    useCallback(
+      (pc: RTCPeerConnection) => {
+        pc.onconnectionstatechange =
+          () => {
+            const state =
+              pc.connectionState;
 
-        console.log(
-          "WebRTC connection state:",
-          state
-        );
+            console.log(
+              "WebRTC connection state:",
+              state
+            );
 
-        if (state === "connected") {
-          markActive();
-          return;
-        }
+            if (
+              state === "connected"
+            ) {
+              markActive();
+              return;
+            }
 
-        if (
-          state === "failed" ||
-          state === "closed"
-        ) {
-          if (!endedRef.current) {
-            endCall("ended");
-          }
-        }
-      };
+            if (
+              state === "failed" ||
+              state === "closed"
+            ) {
+              if (!endedRef.current) {
+                void endCall("ended");
+              }
+            }
+          };
 
-      pc.oniceconnectionstatechange = () => {
-        const state = pc.iceConnectionState;
+        pc.oniceconnectionstatechange =
+          () => {
+            const state =
+              pc.iceConnectionState;
 
-        console.log(
-          "WebRTC ICE state:",
-          state
-        );
+            console.log(
+              "WebRTC ICE state:",
+              state
+            );
 
-        if (
-          state === "connected" ||
-          state === "completed"
-        ) {
-          markActive();
-        }
+            if (
+              state === "connected" ||
+              state === "completed"
+            ) {
+              markActive();
+            }
 
-        if (state === "failed") {
-          if (!endedRef.current) {
-            endCall("ended");
-          }
-        }
-      };
-    },
-    [endCall, markActive]
-  );
+            if (state === "failed") {
+              if (!endedRef.current) {
+                void endCall("ended");
+              }
+            }
+          };
+      },
+      [endCall, markActive]
+    );
 
   // ============================================================
   // CALLER
-  // Create outgoing call exactly once.
   // ============================================================
 
-  const startOutgoingCall = useCallback(async () => {
-    if (endedRef.current) return;
+  const startOutgoingCall =
+    useCallback(async () => {
+      if (endedRef.current) return;
 
-    if (outgoingStartedRef.current) {
-      return;
-    }
-
-    outgoingStartedRef.current = true;
-
-    try {
-      setError(null);
-
-      if (
-        !navigator.mediaDevices ||
-        !navigator.mediaDevices.getUserMedia
-      ) {
-        throw new Error(
-          "Camera and microphone are not available."
-        );
-      }
-
-      const stream =
-        await navigator.mediaDevices.getUserMedia({
-          audio: true,
-          video: callType === "video",
-        });
-
-      if (endedRef.current) {
-        stream
-          .getTracks()
-          .forEach((track) => track.stop());
-
+      if (outgoingStartedRef.current) {
         return;
       }
 
-      localStreamRef.current = stream;
+      outgoingStartedRef.current = true;
 
-      // The local <video> element is mounted only after the call
-      // becomes active. Keep the stream in the ref and attach it
-      // from the media-element effect below.
-      const pc = new RTCPeerConnection({
-        iceServers: ICE_SERVERS,
-      });
+      try {
+        setError(null);
 
-      pcRef.current = pc;
-
-      configureConnectionHandlers(pc);
-
-      stream.getTracks().forEach((track) => {
-        pc.addTrack(track, stream);
-      });
-
-      pc.ontrack = (event) => {
-        const remoteStream =
-          event.streams?.[0] ??
-          new MediaStream([event.track]);
-
-        attachRemoteStream(remoteStream);
-      };
-
-      const callerIce: string[] = [];
-
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          callerIce.push(
-            JSON.stringify(event.candidate)
+        if (
+          !navigator.mediaDevices ||
+          !navigator.mediaDevices
+            .getUserMedia
+        ) {
+          throw new Error(
+            "Camera and microphone are not available."
           );
         }
-      };
 
-      const offer =
-        await pc.createOffer();
+        const stream =
+          await navigator.mediaDevices.getUserMedia(
+            {
+              audio: true,
+              video: callType === "video",
+            }
+          );
 
-      await pc.setLocalDescription(offer);
+        if (endedRef.current) {
+          stream
+            .getTracks()
+            .forEach((track) =>
+              track.stop()
+            );
 
-      await waitForIceGathering(pc);
+          return;
+        }
 
-      if (endedRef.current) {
-        return;
-      }
+        localStreamRef.current =
+          stream;
 
-      const localDescription =
-        pc.localDescription;
+        const pc =
+          new RTCPeerConnection({
+            iceServers: ICE_SERVERS,
+          });
 
-      if (!localDescription) {
-        throw new Error(
-          "Could not create local SDP offer."
+        pcRef.current = pc;
+
+        configureConnectionHandlers(pc);
+
+        stream
+          .getTracks()
+          .forEach((track) => {
+            const sender =
+              pc.addTrack(
+                track,
+                stream
+              );
+
+            if (
+              track.kind === "video"
+            ) {
+              videoSenderRef.current =
+                sender;
+            }
+          });
+
+        pc.ontrack = (event) => {
+          const remoteStream =
+            event.streams?.[0] ??
+            new MediaStream([
+              event.track,
+            ]);
+
+          attachRemoteStream(
+            remoteStream
+          );
+        };
+
+        const callerIce: string[] =
+          [];
+
+        pc.onicecandidate = (
+          event
+        ) => {
+          if (event.candidate) {
+            callerIce.push(
+              JSON.stringify(
+                event.candidate
+              )
+            );
+          }
+        };
+
+        const offer =
+          await pc.createOffer();
+
+        await pc.setLocalDescription(
+          offer
         );
-      }
 
-      const {
-        data,
-        error: insertError,
-      } = await supabase
-        .from("call_signaling")
-        .insert({
-          chat_id: chatId,
-          caller_id: myId,
-          callee_id: theirId,
-          call_type: callType,
-          status: "ringing",
-          sdp_offer: JSON.stringify(
-            localDescription
-          ),
-          caller_ice: callerIce,
-        })
-        .select()
-        .single();
+        await waitForIceGathering(
+          pc
+        );
 
-      if (insertError || !data) {
+        if (endedRef.current) {
+          return;
+        }
+
+        const localDescription =
+          pc.localDescription;
+
+        if (!localDescription) {
+          throw new Error(
+            "Could not create local SDP offer."
+          );
+        }
+
+        const {
+          data,
+          error: insertError,
+        } = await supabase
+          .from("call_signaling")
+          .insert({
+            chat_id: chatId,
+            caller_id: myId,
+            callee_id: theirId,
+            call_type: callType,
+            status: "ringing",
+            sdp_offer:
+              JSON.stringify(
+                localDescription
+              ),
+            caller_ice: callerIce,
+          })
+          .select()
+          .single();
+
+        if (
+          insertError ||
+          !data
+        ) {
+          console.error(
+            "Could not create call:",
+            insertError
+          );
+
+          setError(
+            "Could not start call."
+          );
+
+          outgoingStartedRef.current =
+            false;
+
+          await endCall("ended");
+
+          return;
+        }
+
+        const newCall =
+          data as CallSignaling;
+
+        callIdRef.current =
+          newCall.id;
+
+        setCallId(newCall.id);
+
+        console.log(
+          "Outgoing call created:",
+          newCall.id
+        );
+      } catch (error) {
         console.error(
-          "Could not create call:",
-          insertError
+          "Failed to start outgoing call:",
+          error
         );
 
-        setError("Could not start call.");
+        if (!endedRef.current) {
+          setError(
+            "Could not access camera/microphone. Please check browser permissions."
+          );
 
-        outgoingStartedRef.current = false;
+          outgoingStartedRef.current =
+            false;
 
-        await endCall("ended");
+          await endCall("ended");
+        }
+      }
+    }, [
+      attachRemoteStream,
+      callType,
+      chatId,
+      configureConnectionHandlers,
+      endCall,
+      myId,
+      theirId,
+      waitForIceGathering,
+    ]);
 
+  // ============================================================
+  // CALLEE
+  // ============================================================
+
+  const acceptCall =
+    useCallback(async () => {
+      if (!incomingCall) return;
+      if (endedRef.current) return;
+
+      if (acceptStartedRef.current) {
         return;
       }
 
-      const newCall =
-        data as CallSignaling;
+      acceptStartedRef.current = true;
 
-      callIdRef.current = newCall.id;
-      setCallId(newCall.id);
+      phaseRef.current =
+        "connecting";
 
-      console.log(
-        "Outgoing call created:",
-        newCall.id
-      );
-    } catch (error) {
-      console.error(
-        "Failed to start outgoing call:",
-        error
-      );
+      setPhase("connecting");
+      setError(null);
 
-      if (!endedRef.current) {
+      try {
+        if (
+          !navigator.mediaDevices ||
+          !navigator.mediaDevices
+            .getUserMedia
+        ) {
+          throw new Error(
+            "Camera and microphone are not available."
+          );
+        }
+
+        const stream =
+          await navigator.mediaDevices.getUserMedia(
+            {
+              audio: true,
+              video:
+                incomingCall.call_type ===
+                "video",
+            }
+          );
+
+        if (endedRef.current) {
+          stream
+            .getTracks()
+            .forEach((track) =>
+              track.stop()
+            );
+
+          return;
+        }
+
+        localStreamRef.current =
+          stream;
+
+        const pc =
+          new RTCPeerConnection({
+            iceServers: ICE_SERVERS,
+          });
+
+        pcRef.current = pc;
+
+        configureConnectionHandlers(pc);
+
+        stream
+          .getTracks()
+          .forEach((track) => {
+            const sender =
+              pc.addTrack(
+                track,
+                stream
+              );
+
+            if (
+              track.kind === "video"
+            ) {
+              videoSenderRef.current =
+                sender;
+            }
+          });
+
+        pc.ontrack = (event) => {
+          const remoteStream =
+            event.streams?.[0] ??
+            new MediaStream([
+              event.track,
+            ]);
+
+          attachRemoteStream(
+            remoteStream
+          );
+        };
+
+        const calleeIce: string[] =
+          [];
+
+        pc.onicecandidate = (
+          event
+        ) => {
+          if (event.candidate) {
+            calleeIce.push(
+              JSON.stringify(
+                event.candidate
+              )
+            );
+          }
+        };
+
+        if (
+          !incomingCall.sdp_offer
+        ) {
+          throw new Error(
+            "Missing SDP offer."
+          );
+        }
+
+        await pc.setRemoteDescription(
+          JSON.parse(
+            incomingCall.sdp_offer
+          )
+        );
+
+        await addIceCandidates(
+          pc,
+          incomingCall.caller_ice
+        );
+
+        const answer =
+          await pc.createAnswer();
+
+        await pc.setLocalDescription(
+          answer
+        );
+
+        await waitForIceGathering(
+          pc
+        );
+
+        if (endedRef.current) {
+          return;
+        }
+
+        const localDescription =
+          pc.localDescription;
+
+        if (!localDescription) {
+          throw new Error(
+            "Could not create local SDP answer."
+          );
+        }
+
+        await updateCall(
+          incomingCall.id,
+          {
+            status: "accepted",
+            sdp_answer:
+              JSON.stringify(
+                localDescription
+              ),
+            callee_ice:
+              calleeIce,
+          }
+        );
+
+        callIdRef.current =
+          incomingCall.id;
+
+        setCallId(
+          incomingCall.id
+        );
+
+        console.log(
+          "Incoming call accepted:",
+          incomingCall.id
+        );
+
+        if (
+          pc.connectionState ===
+            "connected" ||
+          pc.iceConnectionState ===
+            "connected" ||
+          pc.iceConnectionState ===
+            "completed"
+        ) {
+          markActive();
+        }
+      } catch (error) {
+        console.error(
+          "Failed to accept incoming call:",
+          error
+        );
+
         setError(
           "Could not access camera/microphone. Please check browser permissions."
         );
 
-        outgoingStartedRef.current = false;
+        acceptStartedRef.current =
+          false;
 
         await endCall("ended");
       }
-    }
-  }, [
-    attachRemoteStream,
-    callType,
-    chatId,
-    configureConnectionHandlers,
-    endCall,
-    myId,
-    theirId,
-    waitForIceGathering,
-  ]);
+    }, [
+      addIceCandidates,
+      attachRemoteStream,
+      configureConnectionHandlers,
+      endCall,
+      incomingCall,
+      markActive,
+      updateCall,
+      waitForIceGathering,
+    ]);
 
   // ============================================================
-  // CALLEE
-  // Accept incoming call exactly once.
-  // ============================================================
-
-  const acceptCall = useCallback(async () => {
-    if (!incomingCall) return;
-    if (endedRef.current) return;
-
-    if (acceptStartedRef.current) {
-      return;
-    }
-
-    acceptStartedRef.current = true;
-
-    phaseRef.current = "connecting";
-    setPhase("connecting");
-    setError(null);
-
-    try {
-      if (
-        !navigator.mediaDevices ||
-        !navigator.mediaDevices.getUserMedia
-      ) {
-        throw new Error(
-          "Camera and microphone are not available."
-        );
-      }
-
-      const stream =
-        await navigator.mediaDevices.getUserMedia({
-          audio: true,
-          video:
-            incomingCall.call_type === "video",
-        });
-
-      if (endedRef.current) {
-        stream
-          .getTracks()
-          .forEach((track) => track.stop());
-
-        return;
-      }
-
-      localStreamRef.current = stream;
-
-      // The local <video> element is mounted only after the call
-      // becomes active. Keep the stream in the ref and attach it
-      // from the media-element effect below.
-      const pc =
-        new RTCPeerConnection({
-          iceServers: ICE_SERVERS,
-        });
-
-      pcRef.current = pc;
-
-      configureConnectionHandlers(pc);
-
-      stream.getTracks().forEach((track) => {
-        pc.addTrack(track, stream);
-      });
-
-      pc.ontrack = (event) => {
-        const remoteStream =
-          event.streams?.[0] ??
-          new MediaStream([event.track]);
-
-        attachRemoteStream(remoteStream);
-      };
-
-      const calleeIce: string[] = [];
-
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          calleeIce.push(
-            JSON.stringify(event.candidate)
-          );
-        }
-      };
-
-      if (!incomingCall.sdp_offer) {
-        throw new Error(
-          "Missing SDP offer."
-        );
-      }
-
-      await pc.setRemoteDescription(
-        JSON.parse(incomingCall.sdp_offer)
-      );
-
-      await addIceCandidates(
-        pc,
-        incomingCall.caller_ice
-      );
-
-      const answer =
-        await pc.createAnswer();
-
-      await pc.setLocalDescription(answer);
-
-      await waitForIceGathering(pc);
-
-      if (endedRef.current) {
-        return;
-      }
-
-      const localDescription =
-        pc.localDescription;
-
-      if (!localDescription) {
-        throw new Error(
-          "Could not create local SDP answer."
-        );
-      }
-
-      await updateCall(
-        incomingCall.id,
-        {
-          status: "accepted",
-          sdp_answer:
-            JSON.stringify(
-              localDescription
-            ),
-          callee_ice: calleeIce,
-        }
-      );
-
-      callIdRef.current =
-        incomingCall.id;
-
-      setCallId(incomingCall.id);
-
-      console.log(
-        "Incoming call accepted:",
-        incomingCall.id
-      );
-
-      // The actual WebRTC connection state will
-      // switch the UI to active.
-      if (
-        pc.connectionState ===
-          "connected" ||
-        pc.iceConnectionState ===
-          "connected" ||
-        pc.iceConnectionState ===
-          "completed"
-      ) {
-        markActive();
-      }
-    } catch (error) {
-      console.error(
-        "Failed to accept incoming call:",
-        error
-      );
-
-      setError(
-        "Could not access camera/microphone. Please check browser permissions."
-      );
-
-      acceptStartedRef.current = false;
-
-      await endCall("ended");
-    }
-  }, [
-    addIceCandidates,
-    attachRemoteStream,
-    configureConnectionHandlers,
-    endCall,
-    incomingCall,
-    markActive,
-    updateCall,
-    waitForIceGathering,
-  ]);
-
-  // ============================================================
-  // INCOMING CALL RINGTONE
-  // ============================================================
-  // Play the custom chess.mp3 ringtone while the incoming-call screen
-  // is visible. It loops until the call is accepted/declined/ended.
-  // Some mobile browsers block autoplay; the accept/decline buttons
-  // remain usable and the ringtone will start whenever the browser
-  // permits playback.
+  // RINGTONE
   // ============================================================
 
   useEffect(() => {
-    if (isCaller || phase !== "incoming" || endedRef.current) {
+    if (
+      isCaller ||
+      phase !== "incoming" ||
+      endedRef.current
+    ) {
       if (ringtoneRef.current) {
         ringtoneRef.current.pause();
-        ringtoneRef.current.currentTime = 0;
+        ringtoneRef.current.currentTime =
+          0;
       }
 
       return;
     }
 
-    const ringtone = ringtoneRef.current;
+    const ringtone =
+      ringtoneRef.current;
+
     if (!ringtone) return;
 
     ringtone.loop = true;
     ringtone.volume = 1;
 
-    const playRingtone = async () => {
-      try {
-        ringtone.currentTime = 0;
-        await ringtone.play();
-      } catch (error) {
-        // Mobile browsers may block audio until the user interacts
-        // with the page. Do not let this affect the call itself.
-        console.warn("Incoming call ringtone playback was blocked:", error);
-      }
-    };
+    const playRingtone =
+      async () => {
+        try {
+          ringtone.currentTime = 0;
+          await ringtone.play();
+        } catch (error) {
+          console.warn(
+            "Incoming call ringtone playback was blocked:",
+            error
+          );
+        }
+      };
 
     void playRingtone();
 
@@ -851,7 +1141,7 @@ export default function CallModal({
     if (!isCaller) return;
     if (propCallId) return;
 
-    startOutgoingCall();
+    void startOutgoingCall();
   }, [
     isCaller,
     propCallId,
@@ -859,8 +1149,7 @@ export default function CallModal({
   ]);
 
   // ============================================================
-  // CALLER LISTEN FOR ANSWER
-  // Realtime + polling fallback.
+  // CALLER ANSWER LISTENER
   // ============================================================
 
   useEffect(() => {
@@ -871,67 +1160,76 @@ export default function CallModal({
 
     let cancelled = false;
 
-    const processCallUpdate = async (
-      row: CallSignaling
-    ) => {
-      if (cancelled) return;
-      if (endedRef.current) return;
+    const processCallUpdate =
+      async (row: CallSignaling) => {
+        if (cancelled) return;
+        if (endedRef.current) return;
 
-      if (
-        row.status === "declined" ||
-        row.status === "ended" ||
-        row.status === "missed"
-      ) {
-        await endCall("ended");
-        return;
-      }
-
-      if (
-        row.status !== "accepted" ||
-        !row.sdp_answer ||
-        !pcRef.current
-      ) {
-        return;
-      }
-
-      const pc = pcRef.current;
-
-      if (!answerAppliedRef.current) {
-        try {
-          // Make sure we never apply the same answer twice.
-          answerAppliedRef.current = true;
-
-          await pc.setRemoteDescription(
-            JSON.parse(row.sdp_answer)
-          );
-
-          await addIceCandidates(
-            pc,
-            row.callee_ice
-          );
-        } catch (error) {
-          console.error(
-            "Failed to apply call answer:",
-            error
-          );
-
-          answerAppliedRef.current = false;
-
+        if (
+          row.status === "declined" ||
+          row.status === "ended" ||
+          row.status === "missed"
+        ) {
+          await endCall("ended");
           return;
         }
-      }
 
-      if (
-        pc.connectionState === "connected" ||
-        pc.iceConnectionState === "connected" ||
-        pc.iceConnectionState === "completed"
-      ) {
-        markActive();
-      }
-    };
+        if (
+          row.status !== "accepted" ||
+          !row.sdp_answer ||
+          !pcRef.current
+        ) {
+          return;
+        }
+
+        const pc = pcRef.current;
+
+        if (
+          !answerAppliedRef.current
+        ) {
+          try {
+            answerAppliedRef.current =
+              true;
+
+            await pc.setRemoteDescription(
+              JSON.parse(
+                row.sdp_answer
+              )
+            );
+
+            await addIceCandidates(
+              pc,
+              row.callee_ice
+            );
+          } catch (error) {
+            console.error(
+              "Failed to apply call answer:",
+              error
+            );
+
+            answerAppliedRef.current =
+              false;
+
+            return;
+          }
+        }
+
+        if (
+          pc.connectionState ===
+            "connected" ||
+          pc.iceConnectionState ===
+            "connected" ||
+          pc.iceConnectionState ===
+            "completed"
+        ) {
+          markActive();
+        }
+      };
 
     const channel = supabase
-      .channel(`call-answer-${cid}`)
+      .channel(
+        `call-answer-${cid}`
+      )
       .on(
         "postgres_changes",
         {
@@ -948,11 +1246,6 @@ export default function CallModal({
       )
       .subscribe();
 
-    /**
-     * Poll ONLY the existing call.
-     *
-     * This never creates another call.
-     */
     const pollInterval =
       setInterval(async () => {
         if (cancelled) return;
@@ -988,8 +1281,13 @@ export default function CallModal({
     return () => {
       cancelled = true;
 
-      supabase.removeChannel(channel);
-      clearInterval(pollInterval);
+      supabase.removeChannel(
+        channel
+      );
+
+      clearInterval(
+        pollInterval
+      );
     };
   }, [
     addIceCandidates,
@@ -1000,7 +1298,7 @@ export default function CallModal({
   ]);
 
   // ============================================================
-  // CALLEE LISTEN FOR REMOTE END
+  // CALLEE REMOTE END
   // ============================================================
 
   useEffect(() => {
@@ -1011,19 +1309,18 @@ export default function CallModal({
 
     let cancelled = false;
 
-    const handleRemoteStatus = async (
-      row: CallSignaling
-    ) => {
-      if (cancelled) return;
-      if (endedRef.current) return;
+    const handleRemoteStatus =
+      async (row: CallSignaling) => {
+        if (cancelled) return;
+        if (endedRef.current) return;
 
-      if (
-        row.status === "ended" ||
-        row.status === "missed"
-      ) {
-        await endCall("ended");
-      }
-    };
+        if (
+          row.status === "ended" ||
+          row.status === "missed"
+        ) {
+          await endCall("ended");
+        }
+      };
 
     const channel = supabase
       .channel(
@@ -1045,9 +1342,6 @@ export default function CallModal({
       )
       .subscribe();
 
-    /**
-     * Poll ONLY this specific call.
-     */
     const pollInterval =
       setInterval(async () => {
         if (cancelled) return;
@@ -1058,7 +1352,9 @@ export default function CallModal({
           error: pollError,
         } = await supabase
           .from("call_signaling")
-          .select("id, status")
+          .select(
+            "id, status"
+          )
           .eq("id", cid)
           .maybeSingle();
 
@@ -1081,8 +1377,13 @@ export default function CallModal({
     return () => {
       cancelled = true;
 
-      supabase.removeChannel(channel);
-      clearInterval(pollInterval);
+      supabase.removeChannel(
+        channel
+      );
+
+      clearInterval(
+        pollInterval
+      );
     };
   }, [
     endCall,
@@ -1102,9 +1403,10 @@ export default function CallModal({
     const timeout = setTimeout(() => {
       if (
         !endedRef.current &&
-        phaseRef.current === "outgoing"
+        phaseRef.current ===
+          "outgoing"
       ) {
-        endCall("missed");
+        void endCall("missed");
       }
     }, 45000);
 
@@ -1119,45 +1421,55 @@ export default function CallModal({
   ]);
 
   // ============================================================
-  // ATTACH MEDIA ELEMENTS
+  // ATTACH MEDIA
   // ============================================================
-  //
-  // The video elements are rendered only when phase === "active".
-  // WebRTC can deliver ontrack before React has mounted those
-  // elements, so attach the streams whenever the active UI mounts.
-  //
+
   useEffect(() => {
-    if (!isVideo || phase !== "active") return;
+    if (!isVideo) return;
+    if (phase !== "active") return;
 
-    const localStream = localStreamRef.current;
-    const localVideo = localVideoRef.current;
+    const localStream =
+      localStreamRef.current;
 
-    if (localStream && localVideo) {
-      localVideo.srcObject = localStream;
+    const localVideo =
+      localVideoRef.current;
+
+    if (
+      localStream &&
+      localVideo &&
+      !screenSharing
+    ) {
+      localVideo.srcObject =
+        localStream;
+
       localVideo.muted = true;
 
-      localVideo.play().catch((error) => {
-        console.warn(
-          "Local video autoplay/playback was blocked:",
-          error
-        );
+      localVideo.play().catch(() => {
+        // Ignore autoplay errors.
       });
     }
 
-    const remoteStream = remoteStreamRef.current;
-    const remoteVideo = remoteVideoRef.current;
+    const remoteStream =
+      remoteStreamRef.current;
 
-    if (remoteStream && remoteVideo) {
-      remoteVideo.srcObject = remoteStream;
+    const remoteVideo =
+      remoteVideoRef.current;
 
-      const playRemoteVideo = () => {
-        remoteVideo.play().catch((error) => {
-          console.warn(
-            "Remote video autoplay/playback was blocked:",
-            error
-          );
-        });
-      };
+    if (
+      remoteStream &&
+      remoteVideo
+    ) {
+      remoteVideo.srcObject =
+        remoteStream;
+
+      const playRemoteVideo =
+        () => {
+          remoteVideo
+            .play()
+            .catch(() => {
+              // Ignore autoplay errors.
+            });
+        };
 
       if (
         remoteVideo.readyState >=
@@ -1165,19 +1477,25 @@ export default function CallModal({
       ) {
         playRemoteVideo();
       } else {
-        remoteVideo.onloadedmetadata = playRemoteVideo;
+        remoteVideo.onloadedmetadata =
+          playRemoteVideo;
       }
     }
 
     return () => {
       if (remoteVideo) {
-        remoteVideo.onloadedmetadata = null;
+        remoteVideo.onloadedmetadata =
+          null;
       }
     };
-  }, [isVideo, phase]);
+  }, [
+    isVideo,
+    phase,
+    screenSharing,
+  ]);
 
   // ============================================================
-  // CLEANUP ON UNMOUNT
+  // CLEANUP
   // ============================================================
 
   useEffect(() => {
@@ -1199,18 +1517,24 @@ export default function CallModal({
     const audioTracks =
       stream.getAudioTracks();
 
-    if (audioTracks.length === 0) return;
+    if (audioTracks.length === 0)
+      return;
 
     const nextMuted = !muted;
 
-    audioTracks.forEach((track) => {
-      track.enabled = !nextMuted;
-    });
+    audioTracks.forEach(
+      (track) => {
+        track.enabled =
+          !nextMuted;
+      }
+    );
 
     setMuted(nextMuted);
   }
 
   function toggleVideo() {
+    if (screenSharing) return;
+
     const stream =
       localStreamRef.current;
 
@@ -1219,37 +1543,220 @@ export default function CallModal({
     const videoTracks =
       stream.getVideoTracks();
 
-    if (videoTracks.length === 0) return;
+    if (videoTracks.length === 0)
+      return;
 
-    const nextVideoOff = !videoOff;
+    const nextVideoOff =
+      !videoOff;
 
-    videoTracks.forEach((track) => {
-      track.enabled = !nextVideoOff;
-    });
+    videoTracks.forEach(
+      (track) => {
+        track.enabled =
+          !nextVideoOff;
+      }
+    );
 
     setVideoOff(nextVideoOff);
   }
 
+  function toggleFullscreen() {
+    const video =
+      remoteVideoRef.current;
+
+    if (!video) return;
+
+    if (
+      document.fullscreenElement
+    ) {
+      void document.exitFullscreen();
+      setRemoteVideoFullscreen(
+        false
+      );
+      return;
+    }
+
+    if (
+      video.requestFullscreen
+    ) {
+      void video
+        .requestFullscreen()
+        .then(() => {
+          setRemoteVideoFullscreen(
+            true
+          );
+        })
+        .catch(() => {
+          // Ignore fullscreen errors.
+        });
+    }
+  }
+
+  const statusText = () => {
+    if (phase === "outgoing") {
+      return isVideo
+        ? "Calling video…"
+        : "Calling…";
+    }
+
+    if (phase === "incoming") {
+      return "Incoming call";
+    }
+
+    if (phase === "connecting") {
+      return "Connecting…";
+    }
+
+    if (phase === "active") {
+      return fmtDuration(
+        duration
+      );
+    }
+
+    return "Call ended";
+  };
+
   return (
-    <div className="fixed inset-0 z-[60] flex flex-col items-center justify-center bg-slate-900">
-      {/* Remote video */}
-      {isVideo && phase === "active" && (
-        <video
-          ref={remoteVideoRef}
-          autoPlay
-          playsInline
-          className="absolute inset-0 h-full w-full object-cover"
-        />
+    <div className="fixed inset-0 z-[60] overflow-hidden bg-[#202124] text-white">
+      {/* ====================================================== */}
+      {/* REMOTE VIDEO STAGE */}
+      {/* ====================================================== */}
+
+      {isVideo &&
+        phase === "active" && (
+          <div className="absolute inset-0 flex items-center justify-center bg-[#202124]">
+            <video
+              ref={remoteVideoRef}
+              autoPlay
+              playsInline
+              className="h-full w-full object-contain md:object-cover"
+            />
+
+            {/* Top bar */}
+            <div className="pointer-events-none absolute left-0 right-0 top-0 z-20 flex items-start justify-between bg-gradient-to-b from-black/60 to-transparent px-4 pb-16 pt-[max(16px,env(safe-area-inset-top))] md:px-8">
+              <div className="pointer-events-auto flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-emerald-600 text-sm font-semibold shadow-lg">
+                  {initials(
+                    theirName
+                  )}
+                </div>
+
+                <div>
+                  <div className="text-sm font-medium md:text-base">
+                    {theirName}
+                  </div>
+
+                  <div className="text-xs text-white/70">
+                    {fmtDuration(
+                      duration
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <button
+                onClick={
+                  toggleFullscreen
+                }
+                className="pointer-events-auto flex h-10 w-10 items-center justify-center rounded-full bg-black/40 backdrop-blur-md transition hover:bg-black/60"
+                title="Fullscreen"
+                aria-label="Fullscreen"
+              >
+                <Maximize2 className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Screen sharing indicator */}
+            {screenSharing && (
+              <div className="absolute left-1/2 top-5 z-30 -translate-x-1/2 rounded-full bg-black/60 px-4 py-2 text-xs font-medium backdrop-blur-md md:top-6">
+                You are sharing your screen
+              </div>
+            )}
+
+            {/* Local preview */}
+            <div className="absolute bottom-[112px] right-3 z-30 h-32 w-24 overflow-hidden rounded-xl border border-white/20 bg-[#3c4043] shadow-2xl sm:bottom-28 sm:right-5 sm:h-40 sm:w-32 md:h-44 md:w-56">
+              {videoOff &&
+              !screenSharing ? (
+                <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-[#3c4043]">
+                  <div className="flex h-12 w-12 items-center justify-center rounded-full bg-emerald-600 text-sm font-semibold">
+                    {initials(
+                      myName
+                    )}
+                  </div>
+
+                  <span className="text-[10px] text-white/60">
+                    Camera off
+                  </span>
+                </div>
+              ) : (
+                <video
+                  ref={localVideoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="h-full w-full object-cover"
+                />
+              )}
+
+              {screenSharing && (
+                <div className="absolute bottom-2 left-2 rounded-md bg-black/60 px-2 py-1 text-[10px]">
+                  Sharing
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+      {/* ====================================================== */}
+      {/* VOICE CALL / PRE-CALL STAGE */}
+      {/* ====================================================== */}
+
+      {(!isVideo ||
+        phase !== "active") && (
+        <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-b from-[#202124] via-[#202124] to-[#171717]">
+          <div className="flex w-full max-w-md flex-col items-center px-6 text-center">
+            <div className="mb-6 flex h-28 w-28 items-center justify-center rounded-full bg-emerald-600 text-3xl font-semibold shadow-2xl sm:h-32 sm:w-32 sm:text-4xl">
+              {initials(
+                theirName
+              )}
+            </div>
+
+            <h2 className="text-2xl font-semibold sm:text-3xl">
+              {theirName}
+            </h2>
+
+            <p className="mt-2 text-sm text-white/60 sm:text-base">
+              {statusText()}
+            </p>
+
+            {error && (
+              <div className="mt-5 max-w-sm rounded-xl bg-red-500/10 px-4 py-3 text-sm text-red-300">
+                {error}
+              </div>
+            )}
+
+            {screenShareError && (
+              <div className="mt-3 max-w-sm rounded-xl bg-orange-500/10 px-4 py-3 text-sm text-orange-300">
+                {screenShareError}
+              </div>
+            )}
+          </div>
+        </div>
       )}
 
-      {/* Remote audio */}
+      {/* ====================================================== */}
+      {/* REMOTE AUDIO */}
+      {/* ====================================================== */}
+
       <audio
         ref={remoteAudioRef}
         autoPlay
         className="hidden"
       />
 
-      {/* Custom ChessConnect incoming-call ringtone */}
+      {/* ====================================================== */}
+      {/* RINGTONE */}
+      {/* ====================================================== */}
+
       <audio
         ref={ringtoneRef}
         src={`${import.meta.env.BASE_URL}chess.mp3`}
@@ -1259,187 +1766,256 @@ export default function CallModal({
         aria-hidden="true"
       />
 
-      {/* Dark video background */}
+      {/* ====================================================== */}
+      {/* PRE-CALL ERROR */}
+      {/* ====================================================== */}
+
       {isVideo &&
-        phase !== "active" && (
-          <div className="absolute inset-0 bg-slate-900" />
+        phase !== "active" &&
+        error && (
+          <div className="absolute left-1/2 top-1/2 z-20 mt-28 w-[calc(100%-32px)] max-w-sm -translate-x-1/2 rounded-xl bg-red-500/10 px-4 py-3 text-center text-sm text-red-300">
+            {error}
+          </div>
         )}
 
-      <div className="relative z-10 flex flex-col items-center gap-4 px-6">
-        <div className="flex flex-col items-center gap-3">
-          {/* Avatar */}
-          {isVideo &&
-          phase === "active" ? null : (
-            <div className="flex h-28 w-28 items-center justify-center rounded-full bg-emerald-600 text-3xl font-semibold text-white shadow-2xl">
-              {initials(theirName)}
-            </div>
-          )}
+      {/* ====================================================== */}
+      {/* GOOGLE MEET STYLE CONTROL BAR */}
+      {/* ====================================================== */}
 
-          <h2 className="text-xl font-semibold text-white">
-            {theirName}
-          </h2>
+      <div className="absolute bottom-0 left-0 right-0 z-40">
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-36 bg-gradient-to-t from-black/80 to-transparent" />
 
-          <p className="text-sm text-slate-300">
-            {phase === "outgoing" &&
-              (isVideo
-                ? "Calling video…"
-                : "Calling…")}
+        <div className="relative flex justify-center px-3 pb-[max(18px,env(safe-area-inset-bottom))] pt-8 sm:px-5 md:justify-center md:pb-6">
+          <div className="flex max-w-full items-center gap-2 rounded-2xl bg-[#202124]/90 px-2 py-2 shadow-2xl backdrop-blur-xl sm:gap-3 sm:px-3">
+            {/* ================================================= */}
+            {/* INCOMING */}
+            {/* ================================================= */}
 
             {phase === "incoming" &&
-              "Incoming call"}
+              !isCaller && (
+                <>
+                  <button
+                    onClick={() =>
+                      void endCall(
+                        "declined"
+                      )
+                    }
+                    className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-[#ea4335] text-white shadow-lg transition hover:bg-[#d93025] active:scale-95 sm:h-14 sm:w-14"
+                    title="Decline"
+                    aria-label="Decline call"
+                  >
+                    <PhoneOff className="h-6 w-6" />
+                  </button>
 
-            {phase === "connecting" &&
-              "Connecting…"}
+                  <button
+                    onClick={() =>
+                      void acceptCall()
+                    }
+                    disabled={
+                      acceptStartedRef.current
+                    }
+                    className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-[#34a853] text-white shadow-lg transition hover:bg-[#2d8f47] active:scale-95 disabled:opacity-50 sm:h-14 sm:w-14"
+                    title="Accept"
+                    aria-label="Accept call"
+                  >
+                    {isVideo ? (
+                      <Video className="h-6 w-6" />
+                    ) : (
+                      <Phone className="h-6 w-6" />
+                    )}
+                  </button>
+                </>
+              )}
 
-            {phase === "active" &&
-              fmtDuration(duration)}
+            {/* ================================================= */}
+            {/* OUTGOING */}
+            {/* ================================================= */}
 
-            {phase === "ended" &&
-              "Call ended"}
-          </p>
-
-          {error && (
-            <p className="max-w-sm text-center text-sm text-red-400">
-              {error}
-            </p>
-          )}
-        </div>
-
-        {/* Local video */}
-        {isVideo &&
-          phase === "active" && (
-            <div className="absolute bottom-24 right-6 z-20 h-32 w-24 overflow-hidden rounded-xl border-2 border-white/20 bg-slate-800 shadow-lg sm:h-40 sm:w-28">
-              <video
-                ref={localVideoRef}
-                autoPlay
-                playsInline
-                muted
-                className="h-full w-full object-cover"
-              />
-            </div>
-          )}
-
-        <div className="mt-8 flex items-center gap-4">
-          {/* Incoming call */}
-          {phase === "incoming" &&
-            !isCaller && (
-              <>
+            {phase === "outgoing" &&
+              isCaller && (
                 <button
                   onClick={() =>
-                    endCall("declined")
+                    void endCall(
+                      "ended"
+                    )
                   }
-                  className="flex h-14 w-14 items-center justify-center rounded-full bg-red-600 text-white shadow-lg transition hover:bg-red-700"
-                  title="Decline"
+                  className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-[#ea4335] text-white shadow-lg transition hover:bg-[#d93025] active:scale-95"
+                  title="Cancel"
+                  aria-label="Cancel call"
                 >
                   <PhoneOff className="h-6 w-6" />
                 </button>
+              )}
 
+            {/* ================================================= */}
+            {/* CONNECTING */}
+            {/* ================================================= */}
+
+            {phase === "connecting" && (
+              <div className="flex h-14 w-14 items-center justify-center">
+                <Loader2 className="h-7 w-7 animate-spin text-white" />
+              </div>
+            )}
+
+            {/* ================================================= */}
+            {/* ACTIVE */}
+            {/* ================================================= */}
+
+            {phase === "active" && (
+              <>
+                {/* Microphone */}
                 <button
-                  onClick={acceptCall}
-                  disabled={
-                    acceptStartedRef.current
+                  onClick={
+                    toggleMute
                   }
-                  className="flex h-14 w-14 items-center justify-center rounded-full bg-emerald-600 text-white shadow-lg transition hover:bg-emerald-700 disabled:opacity-50"
-                  title="Accept"
+                  className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full transition active:scale-95 sm:h-12 sm:w-12 ${
+                    muted
+                      ? "bg-white text-[#202124]"
+                      : "bg-[#3c4043] text-white hover:bg-[#4a4d50]"
+                  }`}
+                  title={
+                    muted
+                      ? "Turn microphone on"
+                      : "Mute microphone"
+                  }
+                  aria-label={
+                    muted
+                      ? "Turn microphone on"
+                      : "Mute microphone"
+                  }
                 >
-                  {isVideo ? (
-                    <Video className="h-6 w-6" />
+                  {muted ? (
+                    <MicOff className="h-5 w-5" />
                   ) : (
-                    <Phone className="h-6 w-6" />
+                    <Mic className="h-5 w-5" />
                   )}
+                </button>
+
+                {/* Camera */}
+                {isVideo && (
+                  <button
+                    onClick={
+                      toggleVideo
+                    }
+                    disabled={
+                      screenSharing
+                    }
+                    className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 sm:h-12 sm:w-12 ${
+                      videoOff
+                        ? "bg-white text-[#202124]"
+                        : "bg-[#3c4043] text-white hover:bg-[#4a4d50]"
+                    }`}
+                    title={
+                      videoOff
+                        ? "Turn camera on"
+                        : "Turn camera off"
+                    }
+                    aria-label={
+                      videoOff
+                        ? "Turn camera on"
+                        : "Turn camera off"
+                    }
+                  >
+                    {videoOff ? (
+                      <VideoOff className="h-5 w-5" />
+                    ) : (
+                      <Video className="h-5 w-5" />
+                    )}
+                  </button>
+                )}
+
+                {/* Screen Share */}
+                {isVideo && (
+                  <button
+                    onClick={() =>
+                      screenSharing
+                        ? void stopScreenSharing()
+                        : void startScreenSharing()
+                    }
+                    className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full transition active:scale-95 sm:h-12 sm:w-12 ${
+                      screenSharing
+                        ? "bg-white text-[#202124]"
+                        : "bg-[#3c4043] text-white hover:bg-[#4a4d50]"
+                    }`}
+                    title={
+                      screenSharing
+                        ? "Stop sharing"
+                        : "Share screen"
+                    }
+                    aria-label={
+                      screenSharing
+                        ? "Stop sharing"
+                        : "Share screen"
+                    }
+                  >
+                    {screenSharing ? (
+                      <MonitorOff className="h-5 w-5" />
+                    ) : (
+                      <MonitorUp className="h-5 w-5" />
+                    )}
+                  </button>
+                )}
+
+                {/* Speaker indicator */}
+                <div
+                  className="hidden h-12 w-12 items-center justify-center rounded-full bg-[#3c4043] text-white sm:flex"
+                  title="Speaker"
+                  aria-label="Speaker"
+                >
+                  <Volume2 className="h-5 w-5" />
+                </div>
+
+                {/* End */}
+                <button
+                  onClick={() =>
+                    void endCall(
+                      "ended"
+                    )
+                  }
+                  className="ml-1 flex h-14 w-16 shrink-0 items-center justify-center rounded-full bg-[#ea4335] text-white shadow-lg transition hover:bg-[#d93025] active:scale-95 sm:h-14 sm:w-16"
+                  title="End call"
+                  aria-label="End call"
+                >
+                  <PhoneOff className="h-6 w-6" />
                 </button>
               </>
             )}
 
-          {/* Outgoing call */}
-          {phase === "outgoing" &&
-            isCaller && (
-              <button
-                onClick={() =>
-                  endCall("ended")
-                }
-                className="flex h-14 w-14 items-center justify-center rounded-full bg-red-600 text-white shadow-lg transition hover:bg-red-700"
-                title="Cancel"
-              >
-                <PhoneOff className="h-6 w-6" />
-              </button>
+            {/* ================================================= */}
+            {/* ENDED */}
+            {/* ================================================= */}
+
+            {phase === "ended" && (
+              <div className="flex h-12 w-12 items-center justify-center">
+                <Loader2 className="h-6 w-6 animate-spin text-white/60" />
+              </div>
             )}
-
-          {/* Connecting */}
-          {phase === "connecting" && (
-            <Loader2 className="h-8 w-8 animate-spin text-white" />
-          )}
-
-          {/* Active */}
-          {phase === "active" && (
-            <>
-              <button
-                onClick={toggleMute}
-                className={`flex h-12 w-12 items-center justify-center rounded-full shadow-lg transition ${
-                  muted
-                    ? "bg-white text-slate-800"
-                    : "bg-white/20 text-white hover:bg-white/30"
-                }`}
-                title={
-                  muted
-                    ? "Unmute"
-                    : "Mute"
-                }
-              >
-                {muted ? (
-                  <MicOff className="h-5 w-5" />
-                ) : (
-                  <Mic className="h-5 w-5" />
-                )}
-              </button>
-
-              {isVideo && (
-                <button
-                  onClick={toggleVideo}
-                  className={`flex h-12 w-12 items-center justify-center rounded-full shadow-lg transition ${
-                    videoOff
-                      ? "bg-white text-slate-800"
-                      : "bg-white/20 text-white hover:bg-white/30"
-                  }`}
-                  title={
-                    videoOff
-                      ? "Turn on camera"
-                      : "Turn off camera"
-                  }
-                >
-                  {videoOff ? (
-                    <VideoOff className="h-5 w-5" />
-                  ) : (
-                    <Video className="h-5 w-5" />
-                  )}
-                </button>
-              )}
-
-              <button
-                onClick={() =>
-                  endCall("ended")
-                }
-                className="flex h-14 w-14 items-center justify-center rounded-full bg-red-600 text-white shadow-lg transition hover:bg-red-700"
-                title="End call"
-              >
-                <PhoneOff className="h-6 w-6" />
-              </button>
-            </>
-          )}
-
-          {/* Ended */}
-          {phase === "ended" && (
-            <Loader2 className="h-6 w-6 animate-spin text-white" />
-          )}
+          </div>
         </div>
       </div>
+
+      {/* ====================================================== */}
+      {/* SCREEN SHARE ERROR */}
+      {/* ====================================================== */}
+
+      {screenShareError &&
+        phase === "active" && (
+          <div className="absolute bottom-28 left-1/2 z-50 w-[calc(100%-32px)] max-w-sm -translate-x-1/2 rounded-xl bg-black/80 px-4 py-3 text-center text-xs text-white shadow-xl backdrop-blur-md sm:bottom-32">
+            {screenShareError}
+          </div>
+        )}
     </div>
   );
 }
 
-function fmtDuration(s: number): string {
-  const m = Math.floor(s / 60);
-  const sec = s % 60;
+function fmtDuration(
+  seconds: number
+): string {
+  const m = Math.floor(
+    seconds / 60
+  );
+
+  const sec = seconds % 60;
 
   return `${m}:${sec
     .toString()
