@@ -59,11 +59,6 @@ export default function CallModal({
   const [videoOff, setVideoOff] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Keep this value declared before any hook/effect that uses it.
-  // Declaring it later causes a temporal-dead-zone runtime error in the
-  // production/minified build (for example: "Cannot access 'Nt' before initialization").
-  const isVideo = callType === "video";
-
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
@@ -71,6 +66,10 @@ export default function CallModal({
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Incoming call ringtone. Place chess.mp3 in the public folder so it is
+  // available at /chess.mp3 in both development and GitHub Pages builds.
+  const ringtoneRef = useRef<HTMLAudioElement | null>(null);
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -178,6 +177,12 @@ export default function CallModal({
 
     if (remoteAudioRef.current) {
       remoteAudioRef.current.srcObject = null;
+    }
+
+    // Always stop the ringtone when the call is cleaned up.
+    if (ringtoneRef.current) {
+      ringtoneRef.current.pause();
+      ringtoneRef.current.currentTime = 0;
     }
   }, []);
 
@@ -789,6 +794,51 @@ export default function CallModal({
   ]);
 
   // ============================================================
+  // INCOMING CALL RINGTONE
+  // ============================================================
+  // Play the custom chess.mp3 ringtone while the incoming-call screen
+  // is visible. It loops until the call is accepted/declined/ended.
+  // Some mobile browsers block autoplay; the accept/decline buttons
+  // remain usable and the ringtone will start whenever the browser
+  // permits playback.
+  // ============================================================
+
+  useEffect(() => {
+    if (isCaller || phase !== "incoming" || endedRef.current) {
+      if (ringtoneRef.current) {
+        ringtoneRef.current.pause();
+        ringtoneRef.current.currentTime = 0;
+      }
+
+      return;
+    }
+
+    const ringtone = ringtoneRef.current;
+    if (!ringtone) return;
+
+    ringtone.loop = true;
+    ringtone.volume = 1;
+
+    const playRingtone = async () => {
+      try {
+        ringtone.currentTime = 0;
+        await ringtone.play();
+      } catch (error) {
+        // Mobile browsers may block audio until the user interacts
+        // with the page. Do not let this affect the call itself.
+        console.warn("Incoming call ringtone playback was blocked:", error);
+      }
+    };
+
+    void playRingtone();
+
+    return () => {
+      ringtone.pause();
+      ringtone.currentTime = 0;
+    };
+  }, [isCaller, phase]);
+
+  // ============================================================
   // CALLER START
   // ============================================================
 
@@ -1175,223 +1225,212 @@ export default function CallModal({
     setVideoOff(nextVideoOff);
   }
 
+  const isVideo =
+    callType === "video";
+
   return (
-    <div className="fixed inset-0 z-[60] h-[100dvh] w-full overflow-hidden bg-black text-white touch-manipulation">
-      {/* Remote video fills the entire meeting stage */}
-      {isVideo && phase === "active" ? (
+    <div className="fixed inset-0 z-[60] flex flex-col items-center justify-center bg-slate-900">
+      {/* Remote video */}
+      {isVideo && phase === "active" && (
         <video
           ref={remoteVideoRef}
           autoPlay
           playsInline
-          className="absolute inset-0 h-full w-full object-contain bg-black sm:object-cover"
+          className="absolute inset-0 h-full w-full object-cover"
         />
-      ) : (
-        <div className="absolute inset-0 bg-slate-950" />
       )}
 
       {/* Remote audio */}
-      <audio ref={remoteAudioRef} autoPlay className="hidden" />
+      <audio
+        ref={remoteAudioRef}
+        autoPlay
+        className="hidden"
+      />
 
-      {/* Top bar - Meet style */}
-      <div className="absolute inset-x-0 top-0 z-30 flex items-center justify-between bg-gradient-to-b from-black/70 to-transparent px-4 pb-10 pt-[calc(1rem+env(safe-area-inset-top))] sm:px-6">
-        <div className="min-w-0">
-          <h2 className="truncate text-base font-medium sm:text-lg">
-            {theirName}
-          </h2>
-          <div className="mt-0.5 flex items-center gap-2 text-xs text-white/70 sm:text-sm">
-            {phase === "outgoing" && (
-              <>
-                <span className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />
-                <span>{isVideo ? "Calling…" : "Calling…"}</span>
-              </>
-            )}
-            {phase === "incoming" && <span>Incoming call</span>}
-            {phase === "connecting" && (
-              <>
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                <span>Connecting…</span>
-              </>
-            )}
-            {phase === "active" && <span>{fmtDuration(duration)}</span>}
-            {phase === "ended" && <span>Call ended</span>}
-          </div>
-        </div>
+      {/* Custom ChessConnect incoming-call ringtone */}
+      <audio
+        ref={ringtoneRef}
+        src={`${import.meta.env.BASE_URL}chess.mp3`}
+        preload="auto"
+        loop
+        className="hidden"
+        aria-hidden="true"
+      />
 
-        {isVideo && phase === "active" && (
-          <div className="rounded-full bg-black/40 px-3 py-1 text-xs text-white/80 backdrop-blur-md">
-            Video call
-          </div>
+      {/* Dark video background */}
+      {isVideo &&
+        phase !== "active" && (
+          <div className="absolute inset-0 bg-slate-900" />
         )}
-      </div>
 
-      {/* Center state / avatar for calls before video connects */}
-      {(!isVideo || phase !== "active") && (
-        <div className="absolute inset-0 z-10 flex items-center justify-center px-6">
-          <div className="flex flex-col items-center text-center">
-            <div className="flex h-28 w-28 items-center justify-center rounded-full bg-emerald-600 text-3xl font-semibold shadow-2xl ring-4 ring-white/10 sm:h-36 sm:w-36 sm:text-4xl">
+      <div className="relative z-10 flex flex-col items-center gap-4 px-6">
+        <div className="flex flex-col items-center gap-3">
+          {/* Avatar */}
+          {isVideo &&
+          phase === "active" ? null : (
+            <div className="flex h-28 w-28 items-center justify-center rounded-full bg-emerald-600 text-3xl font-semibold text-white shadow-2xl">
               {initials(theirName)}
-            </div>
-            <h3 className="mt-5 text-xl font-semibold sm:text-2xl">
-              {theirName}
-            </h3>
-            <p className="mt-2 text-sm text-white/60">
-              {phase === "outgoing" && "Waiting for them to answer…"}
-              {phase === "incoming" && "Wants to start a call with you"}
-              {phase === "connecting" && "Setting up your call…"}
-              {phase === "ended" && "Call ended"}
-            </p>
-            {error && (
-              <p className="mt-4 max-w-sm rounded-xl bg-red-500/10 px-4 py-2 text-center text-sm text-red-300">
-                {error}
-              </p>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Local preview - small floating tile like Google Meet */}
-      {isVideo && phase === "active" && (
-        <div className="absolute right-3 top-[calc(4.5rem+env(safe-area-inset-top))] z-30 h-32 w-24 overflow-hidden rounded-xl border border-white/20 bg-slate-900 shadow-2xl sm:right-6 sm:top-20 sm:h-40 sm:w-56">
-          <video
-            ref={localVideoRef}
-            autoPlay
-            playsInline
-            muted
-            className="h-full w-full object-cover"
-          />
-
-          {videoOff && (
-            <div className="absolute inset-0 flex items-center justify-center bg-slate-900">
-              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-slate-700 text-sm font-semibold">
-                {initials(myName)}
-              </div>
             </div>
           )}
 
-          <div className="absolute bottom-2 left-2 rounded-md bg-black/50 px-2 py-1 text-[10px] text-white/80 backdrop-blur-sm">
-            You
-          </div>
+          <h2 className="text-xl font-semibold text-white">
+            {theirName}
+          </h2>
+
+          <p className="text-sm text-slate-300">
+            {phase === "outgoing" &&
+              (isVideo
+                ? "Calling video…"
+                : "Calling…")}
+
+            {phase === "incoming" &&
+              "Incoming call"}
+
+            {phase === "connecting" &&
+              "Connecting…"}
+
+            {phase === "active" &&
+              fmtDuration(duration)}
+
+            {phase === "ended" &&
+              "Call ended"}
+          </p>
+
+          {error && (
+            <p className="max-w-sm text-center text-sm text-red-400">
+              {error}
+            </p>
+          )}
         </div>
-      )}
 
-      {/* Incoming / outgoing actions */}
-      {(phase === "incoming" || phase === "outgoing") && (
-        <div className="absolute inset-x-0 bottom-0 z-40 flex justify-center bg-gradient-to-t from-black/80 via-black/40 to-transparent px-6 pb-8 pt-20 sm:pb-10">
-          <div className="flex items-center gap-6">
-            {phase === "incoming" && !isCaller && (
+        {/* Local video */}
+        {isVideo &&
+          phase === "active" && (
+            <div className="absolute bottom-24 right-6 z-20 h-32 w-24 overflow-hidden rounded-xl border-2 border-white/20 bg-slate-800 shadow-lg sm:h-40 sm:w-28">
+              <video
+                ref={localVideoRef}
+                autoPlay
+                playsInline
+                muted
+                className="h-full w-full object-cover"
+              />
+            </div>
+          )}
+
+        <div className="mt-8 flex items-center gap-4">
+          {/* Incoming call */}
+          {phase === "incoming" &&
+            !isCaller && (
               <>
-                <div className="flex flex-col items-center gap-2">
-                  <button
-                    onClick={() => endCall("declined")}
-                    className="flex h-16 w-16 items-center justify-center rounded-full bg-red-600 text-white shadow-xl transition hover:bg-red-700 active:scale-95"
-                    title="Decline"
-                    aria-label="Decline call"
-                  >
-                    <PhoneOff className="h-7 w-7" />
-                  </button>
-                  <span className="text-xs text-white/70">Decline</span>
-                </div>
+                <button
+                  onClick={() =>
+                    endCall("declined")
+                  }
+                  className="flex h-14 w-14 items-center justify-center rounded-full bg-red-600 text-white shadow-lg transition hover:bg-red-700"
+                  title="Decline"
+                >
+                  <PhoneOff className="h-6 w-6" />
+                </button>
 
-                <div className="flex flex-col items-center gap-2">
-                  <button
-                    onClick={acceptCall}
-                    disabled={acceptStartedRef.current}
-                    className="flex h-16 w-16 items-center justify-center rounded-full bg-emerald-600 text-white shadow-xl transition hover:bg-emerald-700 active:scale-95 disabled:opacity-50"
-                    title="Accept"
-                    aria-label="Accept call"
-                  >
-                    {isVideo ? (
-                      <Video className="h-7 w-7" />
-                    ) : (
-                      <Phone className="h-7 w-7" />
-                    )}
-                  </button>
-                  <span className="text-xs text-white/70">Accept</span>
-                </div>
+                <button
+                  onClick={acceptCall}
+                  disabled={
+                    acceptStartedRef.current
+                  }
+                  className="flex h-14 w-14 items-center justify-center rounded-full bg-emerald-600 text-white shadow-lg transition hover:bg-emerald-700 disabled:opacity-50"
+                  title="Accept"
+                >
+                  {isVideo ? (
+                    <Video className="h-6 w-6" />
+                  ) : (
+                    <Phone className="h-6 w-6" />
+                  )}
+                </button>
               </>
             )}
 
-            {phase === "outgoing" && isCaller && (
-              <div className="flex flex-col items-center gap-2">
-                <button
-                  onClick={() => endCall("ended")}
-                  className="flex h-16 w-16 items-center justify-center rounded-full bg-red-600 text-white shadow-xl transition hover:bg-red-700 active:scale-95"
-                  title="Cancel"
-                  aria-label="Cancel call"
-                >
-                  <PhoneOff className="h-7 w-7" />
-                </button>
-                <span className="text-xs text-white/70">Cancel</span>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Bottom control bar - Google Meet inspired */}
-      {phase === "active" && (
-        <div className="absolute inset-x-0 bottom-0 z-40 flex justify-center bg-gradient-to-t from-black/90 via-black/50 to-transparent px-3 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-16 sm:pb-7">
-          <div className="flex w-auto max-w-[calc(100vw-1.5rem)] items-center justify-center gap-2 rounded-2xl border border-white/10 bg-slate-900/90 p-2 shadow-2xl backdrop-blur-xl sm:gap-3 sm:rounded-full sm:px-4">
-            <button
-              onClick={toggleMute}
-              className={`flex h-12 w-12 shrink-0 touch-manipulation items-center justify-center rounded-full transition active:scale-95 sm:h-14 sm:w-14 ${
-                muted
-                  ? "bg-white text-slate-900"
-                  : "bg-white/10 text-white hover:bg-white/20"
-              }`}
-              title={muted ? "Turn on microphone" : "Turn off microphone"}
-              aria-label={muted ? "Unmute microphone" : "Mute microphone"}
-            >
-              {muted ? (
-                <MicOff className="h-5 w-5 sm:h-6 sm:w-6" />
-              ) : (
-                <Mic className="h-5 w-5 sm:h-6 sm:w-6" />
-              )}
-            </button>
-
-            {isVideo && (
+          {/* Outgoing call */}
+          {phase === "outgoing" &&
+            isCaller && (
               <button
-                onClick={toggleVideo}
-                className={`flex h-12 w-12 shrink-0 touch-manipulation items-center justify-center rounded-full transition active:scale-95 sm:h-14 sm:w-14 ${
-                  videoOff
-                    ? "bg-white text-slate-900"
-                    : "bg-white/10 text-white hover:bg-white/20"
-                }`}
-                title={videoOff ? "Turn on camera" : "Turn off camera"}
-                aria-label={videoOff ? "Turn on camera" : "Turn off camera"}
+                onClick={() =>
+                  endCall("ended")
+                }
+                className="flex h-14 w-14 items-center justify-center rounded-full bg-red-600 text-white shadow-lg transition hover:bg-red-700"
+                title="Cancel"
               >
-                {videoOff ? (
-                  <VideoOff className="h-5 w-5 sm:h-6 sm:w-6" />
-                ) : (
-                  <Video className="h-5 w-5 sm:h-6 sm:w-6" />
-                )}
+                <PhoneOff className="h-6 w-6" />
               </button>
             )}
 
-            <button
-              onClick={() => endCall("ended")}
-              className="ml-1 flex h-12 min-w-[64px] shrink-0 touch-manipulation items-center justify-center rounded-full bg-red-600 px-5 text-white shadow-lg transition hover:bg-red-700 active:scale-95 sm:h-14 sm:min-w-[72px]"
-              title="End call"
-              aria-label="End call"
-            >
-              <PhoneOff className="h-5 w-5 sm:h-6 sm:w-6" />
-            </button>
-          </div>
-        </div>
-      )}
+          {/* Connecting */}
+          {phase === "connecting" && (
+            <Loader2 className="h-8 w-8 animate-spin text-white" />
+          )}
 
-      {phase === "ended" && (
-        <div className="absolute inset-x-0 bottom-8 z-40 flex justify-center">
-          <Loader2 className="h-6 w-6 animate-spin text-white/70" />
-        </div>
-      )}
+          {/* Active */}
+          {phase === "active" && (
+            <>
+              <button
+                onClick={toggleMute}
+                className={`flex h-12 w-12 items-center justify-center rounded-full shadow-lg transition ${
+                  muted
+                    ? "bg-white text-slate-800"
+                    : "bg-white/20 text-white hover:bg-white/30"
+                }`}
+                title={
+                  muted
+                    ? "Unmute"
+                    : "Mute"
+                }
+              >
+                {muted ? (
+                  <MicOff className="h-5 w-5" />
+                ) : (
+                  <Mic className="h-5 w-5" />
+                )}
+              </button>
 
-      {/* Error for active video call */}
-      {error && phase === "active" && (
-        <div className="absolute left-1/2 top-20 z-40 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 rounded-xl border border-red-400/20 bg-red-950/80 px-4 py-3 text-center text-sm text-red-200 shadow-xl backdrop-blur-md">
-          {error}
+              {isVideo && (
+                <button
+                  onClick={toggleVideo}
+                  className={`flex h-12 w-12 items-center justify-center rounded-full shadow-lg transition ${
+                    videoOff
+                      ? "bg-white text-slate-800"
+                      : "bg-white/20 text-white hover:bg-white/30"
+                  }`}
+                  title={
+                    videoOff
+                      ? "Turn on camera"
+                      : "Turn off camera"
+                  }
+                >
+                  {videoOff ? (
+                    <VideoOff className="h-5 w-5" />
+                  ) : (
+                    <Video className="h-5 w-5" />
+                  )}
+                </button>
+              )}
+
+              <button
+                onClick={() =>
+                  endCall("ended")
+                }
+                className="flex h-14 w-14 items-center justify-center rounded-full bg-red-600 text-white shadow-lg transition hover:bg-red-700"
+                title="End call"
+              >
+                <PhoneOff className="h-6 w-6" />
+              </button>
+            </>
+          )}
+
+          {/* Ended */}
+          {phase === "ended" && (
+            <Loader2 className="h-6 w-6 animate-spin text-white" />
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }
