@@ -1176,14 +1176,14 @@ export default function CallModal({
   }
 
   return (
-    <div className="fixed inset-0 z-[60] overflow-hidden bg-black text-white">
+    <div className="fixed inset-0 z-[60] h-[100dvh] w-full overflow-hidden bg-black text-white touch-manipulation">
       {/* Remote video fills the entire meeting stage */}
       {isVideo && phase === "active" ? (
         <video
           ref={remoteVideoRef}
           autoPlay
           playsInline
-          className="absolute inset-0 h-full w-full object-cover bg-black"
+          className="absolute inset-0 h-full w-full object-contain bg-black sm:object-cover"
         />
       ) : (
         <div className="absolute inset-0 bg-slate-950" />
@@ -1193,7 +1193,7 @@ export default function CallModal({
       <audio ref={remoteAudioRef} autoPlay className="hidden" />
 
       {/* Top bar - Meet style */}
-      <div className="absolute inset-x-0 top-0 z-30 flex items-center justify-between bg-gradient-to-b from-black/70 to-transparent px-4 pb-10 pt-4 sm:px-6">
+      <div className="absolute inset-x-0 top-0 z-30 flex items-center justify-between bg-gradient-to-b from-black/70 to-transparent px-4 pb-10 pt-[calc(1rem+env(safe-area-inset-top))] sm:px-6">
         <div className="min-w-0">
           <h2 className="truncate text-base font-medium sm:text-lg">
             {theirName}
@@ -1251,7 +1251,7 @@ export default function CallModal({
 
       {/* Local preview - small floating tile like Google Meet */}
       {isVideo && phase === "active" && (
-        <div className="absolute right-3 top-16 z-30 h-28 w-24 overflow-hidden rounded-xl border border-white/20 bg-slate-900 shadow-2xl sm:right-6 sm:top-20 sm:h-40 sm:w-56">
+        <div className="absolute right-3 top-[calc(4.5rem+env(safe-area-inset-top))] z-30 h-32 w-24 overflow-hidden rounded-xl border border-white/20 bg-slate-900 shadow-2xl sm:right-6 sm:top-20 sm:h-40 sm:w-56">
           <video
             ref={localVideoRef}
             autoPlay
@@ -1330,11 +1330,11 @@ export default function CallModal({
 
       {/* Bottom control bar - Google Meet inspired */}
       {phase === "active" && (
-        <div className="absolute inset-x-0 bottom-0 z-40 flex justify-center bg-gradient-to-t from-black/90 via-black/50 to-transparent px-3 pb-5 pt-16 sm:pb-7">
-          <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-slate-900/85 p-2 shadow-2xl backdrop-blur-xl sm:gap-3 sm:rounded-full sm:px-4">
+        <div className="absolute inset-x-0 bottom-0 z-40 flex justify-center bg-gradient-to-t from-black/90 via-black/50 to-transparent px-3 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-16 sm:pb-7">
+          <div className="flex w-auto max-w-[calc(100vw-1.5rem)] items-center justify-center gap-2 rounded-2xl border border-white/10 bg-slate-900/90 p-2 shadow-2xl backdrop-blur-xl sm:gap-3 sm:rounded-full sm:px-4">
             <button
               onClick={toggleMute}
-              className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full transition active:scale-95 sm:h-14 sm:w-14 ${
+              className={`flex h-12 w-12 shrink-0 touch-manipulation items-center justify-center rounded-full transition active:scale-95 sm:h-14 sm:w-14 ${
                 muted
                   ? "bg-white text-slate-900"
                   : "bg-white/10 text-white hover:bg-white/20"
@@ -1352,7 +1352,7 @@ export default function CallModal({
             {isVideo && (
               <button
                 onClick={toggleVideo}
-                className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full transition active:scale-95 sm:h-14 sm:w-14 ${
+                className={`flex h-12 w-12 shrink-0 touch-manipulation items-center justify-center rounded-full transition active:scale-95 sm:h-14 sm:w-14 ${
                   videoOff
                     ? "bg-white text-slate-900"
                     : "bg-white/10 text-white hover:bg-white/20"
@@ -1370,7 +1370,7 @@ export default function CallModal({
 
             <button
               onClick={() => endCall("ended")}
-              className="ml-1 flex h-12 min-w-[64px] shrink-0 items-center justify-center rounded-full bg-red-600 px-5 text-white shadow-lg transition hover:bg-red-700 active:scale-95 sm:h-14 sm:min-w-[72px]"
+              className="ml-1 flex h-12 min-w-[64px] shrink-0 touch-manipulation items-center justify-center rounded-full bg-red-600 px-5 text-white shadow-lg transition hover:bg-red-700 active:scale-95 sm:h-14 sm:min-w-[72px]"
               title="End call"
               aria-label="End call"
             >
