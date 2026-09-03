@@ -70,8 +70,7 @@ export default function CallModal({
 
   const [error, setError] = useState<string | null>(null);
 
-  const [remoteVideoFullscreen, setRemoteVideoFullscreen] =
-    useState(false);
+  const [remoteVideoFullscreen, setRemoteVideoFullscreen] = useState(false);
 
   const isVideo = callType === "video";
 
@@ -94,20 +93,25 @@ export default function CallModal({
   const screenStreamRef = useRef<MediaStream | null>(null);
 
   /*
-   * This is the video track sent to the receiver while sharing.
-   * It contains:
+   * While screen sharing, the receiver gets:
    *
-   *     SCREEN
-   *     + small CAMERA overlay
+   *   SCREEN
+   *   +
+   *   CAMERA PIP
+   *
+   * as one composed video track.
    */
   const composedScreenStreamRef = useRef<MediaStream | null>(null);
   const composedVideoTrackRef = useRef<MediaStreamTrack | null>(null);
 
   /*
-   * Original microphone track is kept in localStreamRef.
-   * While sharing, audio is mixed:
+   * While sharing:
    *
-   *     microphone + screen/tab audio
+   *   MICROPHONE
+   *       +
+   *   SCREEN/TAB AUDIO
+   *
+   * are mixed into one audio track.
    */
   const mixedAudioTrackRef = useRef<MediaStreamTrack | null>(null);
 
@@ -115,17 +119,22 @@ export default function CallModal({
   const screenAudioDestinationRef =
     useRef<MediaStreamAudioDestinationNode | null>(null);
 
-  const screenAnimationFrameRef =
-    useRef<number | null>(null);
+  const screenAnimationFrameRef = useRef<number | null>(null);
 
-  const screenVideoElementRef =
-    useRef<HTMLVideoElement | null>(null);
+  const screenVideoElementRef = useRef<HTMLVideoElement | null>(null);
+  const cameraVideoElementRef = useRef<HTMLVideoElement | null>(null);
+  const screenCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  const cameraVideoElementRef =
-    useRef<HTMLVideoElement | null>(null);
-
-  const screenCanvasRef =
-    useRef<HTMLCanvasElement | null>(null);
+  /*
+   * Prevent duplicate start/stop operations.
+   *
+   * This is particularly useful when:
+   * - the user presses the button quickly
+   * - browser fires "ended"
+   * - cleanup runs at the same time
+   */
+  const screenStartingRef = useRef(false);
+  const screenStoppingRef = useRef(false);
 
   // ============================================================
   // MEDIA ELEMENT REFS
@@ -141,11 +150,9 @@ export default function CallModal({
   // CALL REFS
   // ============================================================
 
-  const timerRef =
-    useRef<ReturnType<typeof setInterval> | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const callIdRef =
-    useRef<string | null>(propCallId);
+  const callIdRef = useRef<string | null>(propCallId);
 
   const endedRef = useRef(false);
 
@@ -191,14 +198,19 @@ export default function CallModal({
   }, []);
 
   // ============================================================
-  // STOP SCREEN SHARE
+  // STOP SCREEN SHARING
   // ============================================================
 
   const stopScreenSharing = useCallback(async () => {
+    if (screenStoppingRef.current) {
+      return;
+    }
+
+    screenStoppingRef.current = true;
+
     const pc = pcRef.current;
 
-    const cameraStream =
-      localStreamRef.current;
+    const cameraStream = localStreamRef.current;
 
     const cameraTrack =
       cameraStream?.getVideoTracks()[0] ?? null;
@@ -206,158 +218,209 @@ export default function CallModal({
     const microphoneTrack =
       cameraStream?.getAudioTracks()[0] ?? null;
 
-    // ----------------------------------------------------------
-    // Stop animation frame
-    // ----------------------------------------------------------
+    try {
+      // --------------------------------------------------------
+      // RESTORE CAMERA FIRST
+      // --------------------------------------------------------
 
-    if (screenAnimationFrameRef.current !== null) {
-      cancelAnimationFrame(
-        screenAnimationFrameRef.current
-      );
-
-      screenAnimationFrameRef.current = null;
-    }
-
-    // ----------------------------------------------------------
-    // Restore original camera
-    // ----------------------------------------------------------
-
-    if (
-      pc &&
-      localVideoSenderRef.current &&
-      cameraTrack
-    ) {
-      try {
-        await localVideoSenderRef.current.replaceTrack(
-          cameraTrack
-        );
-      } catch (error) {
-        console.error(
-          "Failed to restore camera:",
-          error
-        );
-      }
-    }
-
-    // ----------------------------------------------------------
-    // Restore original microphone
-    // ----------------------------------------------------------
-
-    if (
-      pc &&
-      localAudioSenderRef.current &&
-      microphoneTrack
-    ) {
-      try {
-        await localAudioSenderRef.current.replaceTrack(
-          microphoneTrack
-        );
-      } catch (error) {
-        console.error(
-          "Failed to restore microphone:",
-          error
-        );
-      }
-    }
-
-    // ----------------------------------------------------------
-    // Stop composed video track
-    // ----------------------------------------------------------
-
-    if (composedVideoTrackRef.current) {
-      try {
-        composedVideoTrackRef.current.stop();
-      } catch {
-        // Ignore.
+      if (
+        pc &&
+        localVideoSenderRef.current &&
+        cameraTrack &&
+        cameraTrack.readyState === "live"
+      ) {
+        try {
+          await localVideoSenderRef.current.replaceTrack(
+            cameraTrack
+          );
+        } catch (error) {
+          console.error(
+            "Failed to restore camera:",
+            error
+          );
+        }
       }
 
-      composedVideoTrackRef.current = null;
-    }
+      // --------------------------------------------------------
+      // RESTORE MICROPHONE
+      // --------------------------------------------------------
 
-    if (composedScreenStreamRef.current) {
-      composedScreenStreamRef.current
-        .getTracks()
-        .forEach((track) => {
-          try {
-            track.stop();
-          } catch {
-            // Ignore.
-          }
-        });
+      if (
+        pc &&
+        localAudioSenderRef.current &&
+        microphoneTrack &&
+        microphoneTrack.readyState === "live"
+      ) {
+        try {
+          await localAudioSenderRef.current.replaceTrack(
+            microphoneTrack
+          );
+        } catch (error) {
+          console.error(
+            "Failed to restore microphone:",
+            error
+          );
+        }
+      }
 
-      composedScreenStreamRef.current = null;
-    }
+      // --------------------------------------------------------
+      // STOP CANVAS ANIMATION
+      // --------------------------------------------------------
 
-    // ----------------------------------------------------------
-    // Stop screen capture
-    // ----------------------------------------------------------
+      if (screenAnimationFrameRef.current !== null) {
+        cancelAnimationFrame(
+          screenAnimationFrameRef.current
+        );
 
-    if (screenStreamRef.current) {
-      screenStreamRef.current
-        .getTracks()
-        .forEach((track) => {
-          try {
-            track.stop();
-          } catch {
-            // Ignore.
-          }
-        });
+        screenAnimationFrameRef.current = null;
+      }
+
+      // --------------------------------------------------------
+      // CLEAR SCREEN TRACK EVENT HANDLERS
+      // --------------------------------------------------------
+
+      const screenStream =
+        screenStreamRef.current;
+
+      if (screenStream) {
+        screenStream
+          .getTracks()
+          .forEach((track) => {
+            track.onended = null;
+            track.onmute = null;
+            track.onunmute = null;
+          });
+      }
+
+      // --------------------------------------------------------
+      // STOP COMPOSED VIDEO
+      // --------------------------------------------------------
+
+      if (composedVideoTrackRef.current) {
+        try {
+          composedVideoTrackRef.current.stop();
+        } catch {
+          // Ignore.
+        }
+
+        composedVideoTrackRef.current = null;
+      }
+
+      if (composedScreenStreamRef.current) {
+        composedScreenStreamRef.current
+          .getTracks()
+          .forEach((track) => {
+            try {
+              track.stop();
+            } catch {
+              // Ignore.
+            }
+          });
+
+        composedScreenStreamRef.current = null;
+      }
+
+      // --------------------------------------------------------
+      // STOP SCREEN CAPTURE
+      // --------------------------------------------------------
+
+      if (screenStream) {
+        screenStream
+          .getTracks()
+          .forEach((track) => {
+            try {
+              track.stop();
+            } catch {
+              // Ignore.
+            }
+          });
+      }
 
       screenStreamRef.current = null;
-    }
 
-    // ----------------------------------------------------------
-    // Stop screen audio mixing
-    // ----------------------------------------------------------
+      // --------------------------------------------------------
+      // STOP MIXED AUDIO
+      // --------------------------------------------------------
 
-    if (mixedAudioTrackRef.current) {
-      try {
-        mixedAudioTrackRef.current.stop();
-      } catch {
-        // Ignore.
+      if (mixedAudioTrackRef.current) {
+        try {
+          mixedAudioTrackRef.current.stop();
+        } catch {
+          // Ignore.
+        }
+
+        mixedAudioTrackRef.current = null;
       }
 
-      mixedAudioTrackRef.current = null;
-    }
+      if (screenAudioContextRef.current) {
+        try {
+          await screenAudioContextRef.current.close();
+        } catch {
+          // Ignore.
+        }
 
-    if (screenAudioContextRef.current) {
-      try {
-        await screenAudioContextRef.current.close();
-      } catch {
-        // Ignore.
+        screenAudioContextRef.current = null;
       }
 
-      screenAudioContextRef.current = null;
+      screenAudioDestinationRef.current = null;
+
+      // --------------------------------------------------------
+      // CLEAN HIDDEN ELEMENTS
+      // --------------------------------------------------------
+
+      if (screenVideoElementRef.current) {
+        try {
+          screenVideoElementRef.current.pause();
+        } catch {
+          // Ignore.
+        }
+
+        screenVideoElementRef.current.srcObject = null;
+        screenVideoElementRef.current.load();
+      }
+
+      if (cameraVideoElementRef.current) {
+        try {
+          cameraVideoElementRef.current.pause();
+        } catch {
+          // Ignore.
+        }
+
+        cameraVideoElementRef.current.srcObject = null;
+        cameraVideoElementRef.current.load();
+      }
+
+      screenVideoElementRef.current = null;
+      cameraVideoElementRef.current = null;
+      screenCanvasRef.current = null;
+
+      // --------------------------------------------------------
+      // RESTORE LOCAL CAMERA PREVIEW
+      // --------------------------------------------------------
+
+      if (
+        localVideoRef.current &&
+        cameraStream &&
+        cameraTrack &&
+        cameraTrack.readyState === "live"
+      ) {
+        localVideoRef.current.srcObject =
+          cameraStream;
+
+        localVideoRef.current.muted = true;
+
+        void localVideoRef.current
+          .play()
+          .catch(() => {
+            // Ignore autoplay errors.
+          });
+      }
+
+      setScreenSharing(false);
+      setScreenShareError(null);
+    } finally {
+      screenStoppingRef.current = false;
     }
-
-    screenAudioDestinationRef.current = null;
-
-    screenVideoElementRef.current = null;
-    cameraVideoElementRef.current = null;
-    screenCanvasRef.current = null;
-
-    // ----------------------------------------------------------
-    // Restore local preview
-    // ----------------------------------------------------------
-
-    if (
-      localVideoRef.current &&
-      cameraStream
-    ) {
-      localVideoRef.current.srcObject =
-        cameraStream;
-
-      localVideoRef.current.muted = true;
-
-      localVideoRef.current
-        .play()
-        .catch(() => {
-          // Ignore autoplay errors.
-        });
-    }
-
-    setScreenSharing(false);
-    setScreenShareError(null);
   }, []);
 
   // ============================================================
@@ -376,6 +439,10 @@ export default function CallModal({
         screenVideo.autoplay = true;
         screenVideo.muted = true;
         screenVideo.playsInline = true;
+        screenVideo.setAttribute(
+          "playsinline",
+          ""
+        );
 
         const cameraVideo =
           document.createElement("video");
@@ -383,6 +450,10 @@ export default function CallModal({
         cameraVideo.autoplay = true;
         cameraVideo.muted = true;
         cameraVideo.playsInline = true;
+        cameraVideo.setAttribute(
+          "playsinline",
+          ""
+        );
 
         screenVideo.srcObject =
           screenStream;
@@ -405,8 +476,7 @@ export default function CallModal({
           document.createElement("canvas");
 
         /*
-         * 16:9 canvas gives the receiver a stable video
-         * layout similar to Google Meet.
+         * Stable 16:9 output.
          */
         canvas.width = 1280;
         canvas.height = 720;
@@ -452,11 +522,13 @@ export default function CallModal({
             targetRatio
           ) {
             drawWidth = width;
+
             drawHeight =
               width /
               sourceRatio;
           } else {
             drawHeight = height;
+
             drawWidth =
               height *
               sourceRatio;
@@ -484,16 +556,55 @@ export default function CallModal({
         };
 
         const drawFrame = () => {
-          if (
-            endedRef.current ||
-            !screenStreamRef.current
-          ) {
+          if (endedRef.current) {
             return;
           }
 
+          const currentScreenStream =
+            screenStreamRef.current;
+
+          const currentScreenTrack =
+            currentScreenStream?.getVideoTracks()[0];
+
           /*
-           * Background.
+           * IMPORTANT:
+           *
+           * If browser has ended the screen capture,
+           * stop drawing frames.
+           *
+           * This prevents the receiver from being
+           * stuck forever on the last screen frame.
            */
+          if (
+            !currentScreenStream ||
+            !currentScreenTrack ||
+            currentScreenTrack.readyState !==
+              "live"
+          ) {
+            context.clearRect(
+              0,
+              0,
+              canvas.width,
+              canvas.height
+            );
+
+            context.fillStyle =
+              "#000000";
+
+            context.fillRect(
+              0,
+              0,
+              canvas.width,
+              canvas.height
+            );
+
+            return;
+          }
+
+          // ----------------------------------------------------
+          // BLACK BACKGROUND
+          // ----------------------------------------------------
+
           context.fillStyle =
             "#000000";
 
@@ -504,9 +615,10 @@ export default function CallModal({
             canvas.height
           );
 
-          /*
-           * Main screen.
-           */
+          // ----------------------------------------------------
+          // MAIN SCREEN
+          // ----------------------------------------------------
+
           drawVideoContain(
             screenVideo,
             0,
@@ -515,11 +627,10 @@ export default function CallModal({
             canvas.height
           );
 
-          /*
-           * Camera picture-in-picture.
-           *
-           * Approx. 25% of screen width.
-           */
+          // ----------------------------------------------------
+          // CAMERA PICTURE-IN-PICTURE
+          // ----------------------------------------------------
+
           const pipWidth = 300;
           const pipHeight = 169;
 
@@ -530,9 +641,8 @@ export default function CallModal({
 
           const pipY = 28;
 
-          /*
-           * Shadow / background.
-           */
+          // PIP shadow/background
+
           context.fillStyle =
             "rgba(0,0,0,0.45)";
 
@@ -543,9 +653,8 @@ export default function CallModal({
             pipHeight + 8
           );
 
-          /*
-           * Camera.
-           */
+          // Camera
+
           drawVideoContain(
             cameraVideo,
             pipX,
@@ -554,9 +663,8 @@ export default function CallModal({
             pipHeight
           );
 
-          /*
-           * Camera border.
-           */
+          // Camera border
+
           context.strokeStyle =
             "rgba(255,255,255,0.35)";
 
@@ -577,9 +685,7 @@ export default function CallModal({
 
         drawFrame();
 
-        if (
-          !canvas.captureStream
-        ) {
+        if (!canvas.captureStream) {
           throw new Error(
             "Canvas video capture is not supported by this browser."
           );
@@ -625,10 +731,16 @@ export default function CallModal({
           screenStream.getAudioTracks()[0];
 
         /*
-         * If the browser did not provide screen audio,
-         * continue with microphone only.
+         * Some browsers/sources do not provide
+         * screen audio.
+         *
+         * In that case keep the original microphone.
          */
         if (!screenAudioTrack) {
+          console.log(
+            "[CallModal] Screen audio is not available for this capture source."
+          );
+
           return null;
         }
 
@@ -642,7 +754,7 @@ export default function CallModal({
 
         if (!AudioContextClass) {
           console.warn(
-            "Web Audio API is not available."
+            "[CallModal] Web Audio API is not available."
           );
 
           return null;
@@ -665,9 +777,10 @@ export default function CallModal({
         const destination =
           audioContext.createMediaStreamDestination();
 
-        /*
-         * Microphone.
-         */
+        // ------------------------------------------------------
+        // MICROPHONE
+        // ------------------------------------------------------
+
         if (microphoneTrack) {
           const microphoneStream =
             new MediaStream([
@@ -684,9 +797,10 @@ export default function CallModal({
           );
         }
 
-        /*
-         * Screen/tab/system audio.
-         */
+        // ------------------------------------------------------
+        // SCREEN/TAB AUDIO
+        // ------------------------------------------------------
+
         const screenAudioOnlyStream =
           new MediaStream([
             screenAudioTrack,
@@ -719,6 +833,10 @@ export default function CallModal({
         mixedAudioTrackRef.current =
           mixedTrack;
 
+        console.log(
+          "[CallModal] Microphone + screen audio mixed successfully."
+        );
+
         return destination.stream;
       },
       []
@@ -734,12 +852,27 @@ export default function CallModal({
 
       if (screenSharing) return;
 
+      if (screenStartingRef.current) {
+        return;
+      }
+
+      if (screenStoppingRef.current) {
+        return;
+      }
+
       const pc = pcRef.current;
 
       const cameraStream =
         localStreamRef.current;
 
       if (!pc || !cameraStream) {
+        return;
+      }
+
+      if (
+        pc.connectionState ===
+        "closed"
+      ) {
         return;
       }
 
@@ -753,14 +886,22 @@ export default function CallModal({
         return;
       }
 
+      screenStartingRef.current =
+        true;
+
       try {
         setScreenShareError(null);
 
+        console.log(
+          "[CallModal] Requesting screen sharing..."
+        );
+
         /*
-         * Request screen.
+         * Browser displays its own screen/window/tab
+         * selection UI.
          *
-         * audio:true allows Chrome/Edge to offer
-         * tab/system audio where supported.
+         * audio:true allows supported browsers to
+         * provide tab/system audio.
          */
         const screenStream =
           await navigator.mediaDevices.getDisplayMedia(
@@ -781,23 +922,52 @@ export default function CallModal({
         if (!screenTrack) {
           screenStream
             .getTracks()
-            .forEach((track) =>
-              track.stop()
-            );
+            .forEach((track) => {
+              track.stop();
+            });
 
           throw new Error(
             "No screen video was selected."
           );
         }
 
+        // ------------------------------------------------------
+        // SAVE SCREEN STREAM IMMEDIATELY
+        // ------------------------------------------------------
+
         screenStreamRef.current =
           screenStream;
 
         /*
-         * ------------------------------------------------------
-         * Create SCREEN + CAMERA composed video.
-         * ------------------------------------------------------
+         * IMPORTANT:
+         *
+         * Native browser "Stop sharing" button
+         * triggers this.
          */
+        screenTrack.onended = () => {
+          console.log(
+            "[CallModal] Browser ended screen sharing."
+          );
+
+          void stopScreenSharing();
+        };
+
+        screenTrack.onmute = () => {
+          console.log(
+            "[CallModal] Screen track muted."
+          );
+        };
+
+        screenTrack.onunmute = () => {
+          console.log(
+            "[CallModal] Screen track unmuted."
+          );
+        };
+
+        // ------------------------------------------------------
+        // CREATE SCREEN + CAMERA COMPOSITION
+        // ------------------------------------------------------
+
         const composedStream =
           await createComposedScreenVideo(
             screenStream,
@@ -813,28 +983,30 @@ export default function CallModal({
           );
         }
 
-        /*
-         * ------------------------------------------------------
-         * Replace camera video with composed screen+camera.
-         * ------------------------------------------------------
-         */
+        // ------------------------------------------------------
+        // REPLACE CAMERA WITH SCREEN + CAMERA
+        // ------------------------------------------------------
+
         if (
-          localVideoSenderRef.current
+          !localVideoSenderRef.current
         ) {
-          await localVideoSenderRef.current.replaceTrack(
-            composedVideoTrack
-          );
-        } else {
           throw new Error(
             "Could not find the video connection."
           );
         }
 
-        /*
-         * ------------------------------------------------------
-         * Mix microphone + screen audio.
-         * ------------------------------------------------------
-         */
+        await localVideoSenderRef.current.replaceTrack(
+          composedVideoTrack
+        );
+
+        console.log(
+          "[CallModal] Camera video replaced with screen+camera."
+        );
+
+        // ------------------------------------------------------
+        // MIX MIC + SCREEN AUDIO
+        // ------------------------------------------------------
+
         const mixedAudioStream =
           await createMixedScreenAudio(
             screenStream,
@@ -852,15 +1024,23 @@ export default function CallModal({
             await localAudioSenderRef.current.replaceTrack(
               mixedTrack
             );
+
+            console.log(
+              "[CallModal] Microphone audio replaced with mixed audio."
+            );
           }
         }
 
+        // ------------------------------------------------------
+        // UPDATE STATE
+        // ------------------------------------------------------
+
         setScreenSharing(true);
 
-        /*
-         * Local preview should show the same
-         * screen + camera composition.
-         */
+        // ------------------------------------------------------
+        // LOCAL PREVIEW
+        // ------------------------------------------------------
+
         if (localVideoRef.current) {
           localVideoRef.current.srcObject =
             composedStream;
@@ -868,47 +1048,59 @@ export default function CallModal({
           localVideoRef.current.muted =
             true;
 
-          localVideoRef.current
+          void localVideoRef.current
             .play()
             .catch(() => {
               // Ignore autoplay errors.
             });
         }
 
-        /*
-         * ------------------------------------------------------
-         * Browser native "Stop sharing".
-         * ------------------------------------------------------
-         */
-        screenTrack.onended = () => {
-          void stopScreenSharing();
-        };
+        // ------------------------------------------------------
+        // SCREEN AUDIO END
+        // ------------------------------------------------------
 
-        /*
-         * Screen audio can also end independently.
-         */
         const screenAudioTrack =
           screenStream.getAudioTracks()[0];
 
         if (screenAudioTrack) {
           screenAudioTrack.onended = () => {
             /*
-             * Do NOT stop the entire screen share if only
-             * the audio track ended.
+             * Audio ending does NOT mean screen sharing
+             * has ended.
              *
              * The video screen may still be active.
              */
+            console.log(
+              "[CallModal] Screen audio track ended. Screen video continues."
+            );
+          };
+
+          screenAudioTrack.onmute = () => {
+            console.log(
+              "[CallModal] Screen audio muted."
+            );
+          };
+
+          screenAudioTrack.onunmute = () => {
+            console.log(
+              "[CallModal] Screen audio unmuted."
+            );
           };
         }
+
+        console.log(
+          "[CallModal] Screen sharing started successfully."
+        );
       } catch (error) {
         console.error(
-          "Screen sharing failed:",
+          "[CallModal] Screen sharing failed:",
           error
         );
 
-        /*
-         * Clean up anything partially created.
-         */
+        // ------------------------------------------------------
+        // STOP ANIMATION
+        // ------------------------------------------------------
+
         if (
           screenAnimationFrameRef.current !==
           null
@@ -921,12 +1113,20 @@ export default function CallModal({
             null;
         }
 
+        // ------------------------------------------------------
+        // CLEAR SCREEN HANDLERS + STOP SCREEN
+        // ------------------------------------------------------
+
         if (
           screenStreamRef.current
         ) {
           screenStreamRef.current
             .getTracks()
             .forEach((track) => {
+              track.onended = null;
+              track.onmute = null;
+              track.onunmute = null;
+
               try {
                 track.stop();
               } catch {
@@ -937,6 +1137,10 @@ export default function CallModal({
           screenStreamRef.current =
             null;
         }
+
+        // ------------------------------------------------------
+        // STOP COMPOSED VIDEO
+        // ------------------------------------------------------
 
         if (
           composedVideoTrackRef.current
@@ -968,6 +1172,10 @@ export default function CallModal({
             null;
         }
 
+        // ------------------------------------------------------
+        // CLOSE AUDIO
+        // ------------------------------------------------------
+
         if (
           screenAudioContextRef.current
         ) {
@@ -981,12 +1189,26 @@ export default function CallModal({
             null;
         }
 
-        mixedAudioTrackRef.current =
+        screenAudioDestinationRef.current =
           null;
 
-        /*
-         * Restore camera/mic if necessary.
-         */
+        if (
+          mixedAudioTrackRef.current
+        ) {
+          try {
+            mixedAudioTrackRef.current.stop();
+          } catch {
+            // Ignore.
+          }
+
+          mixedAudioTrackRef.current =
+            null;
+        }
+
+        // ------------------------------------------------------
+        // RESTORE CAMERA
+        // ------------------------------------------------------
+
         const cameraTrack =
           cameraStream.getVideoTracks()[0];
 
@@ -995,29 +1217,67 @@ export default function CallModal({
 
         if (
           localVideoSenderRef.current &&
-          cameraTrack
+          cameraTrack &&
+          cameraTrack.readyState ===
+            "live"
         ) {
           try {
             await localVideoSenderRef.current.replaceTrack(
               cameraTrack
             );
-          } catch {
-            // Ignore.
+          } catch (restoreError) {
+            console.warn(
+              "[CallModal] Could not restore camera:",
+              restoreError
+            );
           }
         }
 
+        // ------------------------------------------------------
+        // RESTORE MICROPHONE
+        // ------------------------------------------------------
+
         if (
           localAudioSenderRef.current &&
-          microphoneTrack
+          microphoneTrack &&
+          microphoneTrack.readyState ===
+            "live"
         ) {
           try {
             await localAudioSenderRef.current.replaceTrack(
               microphoneTrack
             );
-          } catch {
-            // Ignore.
+          } catch (restoreError) {
+            console.warn(
+              "[CallModal] Could not restore microphone:",
+              restoreError
+            );
           }
         }
+
+        // ------------------------------------------------------
+        // RESTORE LOCAL PREVIEW
+        // ------------------------------------------------------
+
+        if (
+          localVideoRef.current
+        ) {
+          localVideoRef.current.srcObject =
+            cameraStream;
+
+          localVideoRef.current.muted =
+            true;
+
+          void localVideoRef.current
+            .play()
+            .catch(() => {
+              // Ignore.
+            });
+        }
+
+        // ------------------------------------------------------
+        // ERROR MESSAGE
+        // ------------------------------------------------------
 
         if (
           error instanceof DOMException &&
@@ -1044,8 +1304,12 @@ export default function CallModal({
         }
 
         setScreenSharing(false);
+      } finally {
+        screenStartingRef.current =
+          false;
       }
     }, [
+      callType,
       cameraVideoElementRef,
       createComposedScreenVideo,
       createMixedScreenAudio,
@@ -1060,9 +1324,16 @@ export default function CallModal({
 
   const cleanup = useCallback(() => {
     if (timerRef.current) {
-      clearInterval(timerRef.current);
+      clearInterval(
+        timerRef.current
+      );
+
       timerRef.current = null;
     }
+
+    // ----------------------------------------------------------
+    // STOP CANVAS
+    // ----------------------------------------------------------
 
     if (
       screenAnimationFrameRef.current !==
@@ -1075,6 +1346,10 @@ export default function CallModal({
       screenAnimationFrameRef.current =
         null;
     }
+
+    // ----------------------------------------------------------
+    // CLOSE AUDIO CONTEXT
+    // ----------------------------------------------------------
 
     if (
       screenAudioContextRef.current
@@ -1092,7 +1367,13 @@ export default function CallModal({
     screenAudioDestinationRef.current =
       null;
 
-    if (mixedAudioTrackRef.current) {
+    // ----------------------------------------------------------
+    // STOP MIXED AUDIO
+    // ----------------------------------------------------------
+
+    if (
+      mixedAudioTrackRef.current
+    ) {
       try {
         mixedAudioTrackRef.current.stop();
       } catch {
@@ -1103,10 +1384,25 @@ export default function CallModal({
         null;
     }
 
+    // ----------------------------------------------------------
+    // STOP SCREEN STREAM
+    // ----------------------------------------------------------
+
     if (screenStreamRef.current) {
       screenStreamRef.current
         .getTracks()
         .forEach((track) => {
+          /*
+           * IMPORTANT:
+           *
+           * Clear handlers BEFORE stop()
+           * so stop() cannot trigger another
+           * stopScreenSharing() call.
+           */
+          track.onended = null;
+          track.onmute = null;
+          track.onunmute = null;
+
           try {
             track.stop();
           } catch {
@@ -1114,8 +1410,13 @@ export default function CallModal({
           }
         });
 
-      screenStreamRef.current = null;
+      screenStreamRef.current =
+        null;
     }
+
+    // ----------------------------------------------------------
+    // STOP COMPOSED STREAM
+    // ----------------------------------------------------------
 
     if (
       composedScreenStreamRef.current
@@ -1134,7 +1435,13 @@ export default function CallModal({
         null;
     }
 
-    if (composedVideoTrackRef.current) {
+    // ----------------------------------------------------------
+    // STOP COMPOSED VIDEO TRACK
+    // ----------------------------------------------------------
+
+    if (
+      composedVideoTrackRef.current
+    ) {
       try {
         composedVideoTrackRef.current.stop();
       } catch {
@@ -1144,6 +1451,10 @@ export default function CallModal({
       composedVideoTrackRef.current =
         null;
     }
+
+    // ----------------------------------------------------------
+    // CLOSE PEER CONNECTION
+    // ----------------------------------------------------------
 
     if (pcRef.current) {
       pcRef.current.ontrack = null;
@@ -1165,6 +1476,10 @@ export default function CallModal({
     localVideoSenderRef.current = null;
     localAudioSenderRef.current = null;
 
+    // ----------------------------------------------------------
+    // STOP LOCAL STREAM
+    // ----------------------------------------------------------
+
     if (localStreamRef.current) {
       localStreamRef.current
         .getTracks()
@@ -1179,21 +1494,45 @@ export default function CallModal({
       localStreamRef.current = null;
     }
 
+    // ----------------------------------------------------------
+    // LOCAL VIDEO
+    // ----------------------------------------------------------
+
     if (localVideoRef.current) {
       localVideoRef.current.onloadedmetadata =
         null;
+
+      try {
+        localVideoRef.current.pause();
+      } catch {
+        // Ignore.
+      }
 
       localVideoRef.current.srcObject =
         null;
     }
 
+    // ----------------------------------------------------------
+    // REMOTE VIDEO
+    // ----------------------------------------------------------
+
     if (remoteVideoRef.current) {
       remoteVideoRef.current.onloadedmetadata =
         null;
 
+      try {
+        remoteVideoRef.current.pause();
+      } catch {
+        // Ignore.
+      }
+
       remoteVideoRef.current.srcObject =
         null;
     }
+
+    // ----------------------------------------------------------
+    // REMOTE AUDIO
+    // ----------------------------------------------------------
 
     if (remoteAudioRef.current) {
       remoteAudioRef.current.srcObject =
@@ -1202,10 +1541,40 @@ export default function CallModal({
 
     remoteStreamRef.current = null;
 
+    // ----------------------------------------------------------
+    // RINGTONE
+    // ----------------------------------------------------------
+
     if (ringtoneRef.current) {
       ringtoneRef.current.pause();
       ringtoneRef.current.currentTime =
         0;
+    }
+
+    // ----------------------------------------------------------
+    // HIDDEN ELEMENTS
+    // ----------------------------------------------------------
+
+    if (screenVideoElementRef.current) {
+      try {
+        screenVideoElementRef.current.pause();
+      } catch {
+        // Ignore.
+      }
+
+      screenVideoElementRef.current.srcObject =
+        null;
+    }
+
+    if (cameraVideoElementRef.current) {
+      try {
+        cameraVideoElementRef.current.pause();
+      } catch {
+        // Ignore.
+      }
+
+      cameraVideoElementRef.current.srcObject =
+        null;
     }
 
     screenVideoElementRef.current =
@@ -1215,6 +1584,9 @@ export default function CallModal({
       null;
 
     screenCanvasRef.current = null;
+
+    screenStartingRef.current = false;
+    screenStoppingRef.current = false;
 
     setScreenSharing(false);
   }, []);
@@ -1463,8 +1835,17 @@ export default function CallModal({
             video.srcObject =
               stream;
 
+            video.muted = false;
+            video.controls = false;
+
             const playVideo =
               () => {
+                if (
+                  endedRef.current
+                ) {
+                  return;
+                }
+
                 video
                   .play()
                   .catch(
@@ -2471,7 +2852,7 @@ export default function CallModal({
       localVideo.muted =
         true;
 
-      localVideo
+      void localVideo
         .play()
         .catch(() => {
           // Ignore autoplay errors.
@@ -2491,9 +2872,20 @@ export default function CallModal({
       remoteVideo.srcObject =
         remoteStream;
 
+      remoteVideo.muted = false;
+      remoteVideo.controls = false;
+
       const playRemoteVideo =
         () => {
-          remoteVideo
+          if (
+            endedRef.current ||
+            phaseRef.current !==
+              "active"
+          ) {
+            return;
+          }
+
+          void remoteVideo
             .play()
             .catch(() => {
               // Ignore autoplay errors.
@@ -2522,6 +2914,94 @@ export default function CallModal({
     phase,
     screenSharing,
   ]);
+
+  // ============================================================
+  // KEEP REMOTE VIDEO PLAYING
+  // ============================================================
+
+  useEffect(() => {
+    if (!isVideo) return;
+    if (phase !== "active") return;
+
+    const video =
+      remoteVideoRef.current;
+
+    if (!video) return;
+
+    const forcePlay = () => {
+      if (
+        endedRef.current ||
+        phaseRef.current !==
+          "active"
+      ) {
+        return;
+      }
+
+      video.controls = false;
+
+      if (video.paused) {
+        void video
+          .play()
+          .catch(() => {
+            // Browser may temporarily block playback.
+          });
+      }
+    };
+
+    video.addEventListener(
+      "pause",
+      forcePlay
+    );
+
+    video.addEventListener(
+      "loadeddata",
+      forcePlay
+    );
+
+    video.addEventListener(
+      "canplay",
+      forcePlay
+    );
+
+    video.addEventListener(
+      "playing",
+      forcePlay
+    );
+
+    const watchdog =
+      window.setInterval(
+        forcePlay,
+        1000
+      );
+
+    forcePlay();
+
+    return () => {
+      video.removeEventListener(
+        "pause",
+        forcePlay
+      );
+
+      video.removeEventListener(
+        "loadeddata",
+        forcePlay
+      );
+
+      video.removeEventListener(
+        "canplay",
+        forcePlay
+      );
+
+      video.removeEventListener(
+        "playing",
+        forcePlay
+      );
+
+      window.clearInterval(
+        watchdog
+      );
+    };
+  }, [isVideo, phase]);
 
   // ============================================================
   // CLEANUP ON UNMOUNT
@@ -2564,11 +3044,10 @@ export default function CallModal({
     );
 
     /*
-     * If screen sharing is active, the microphone
-     * source is mixed through Web Audio.
-     *
-     * Disabling the original microphone track
-     * therefore also removes it from the mixed audio.
+     * If screen sharing is active,
+     * this original microphone track
+     * is one of the sources going into
+     * the mixed Web Audio stream.
      */
     setMuted(nextMuted);
   }
@@ -2704,10 +3183,52 @@ export default function CallModal({
               }
               autoPlay
               playsInline
-              className="h-full w-full object-contain bg-black md:object-cover"
+              muted={false}
+              controls={false}
+              disablePictureInPicture
+              disableRemotePlayback
+              preload="auto"
+              tabIndex={-1}
+              onContextMenu={(event) => {
+                event.preventDefault();
+              }}
+              onPause={() => {
+                const video =
+                  remoteVideoRef.current;
+
+                if (
+                  video &&
+                  phaseRef.current ===
+                    "active" &&
+                  !endedRef.current
+                ) {
+                  void video
+                    .play()
+                    .catch(() => {});
+                }
+              }}
+              onCanPlay={() => {
+                const video =
+                  remoteVideoRef.current;
+
+                if (
+                  video &&
+                  phaseRef.current ===
+                    "active" &&
+                  !endedRef.current
+                ) {
+                  void video
+                    .play()
+                    .catch(() => {});
+                }
+              }}
+              className="pointer-events-none h-full w-full select-none object-contain bg-black md:object-cover"
             />
 
+            {/* ================================================= */}
             {/* TOP BAR */}
+            {/* ================================================= */}
+
             <div className="pointer-events-none absolute left-0 right-0 top-0 z-20 flex items-start justify-between bg-gradient-to-b from-black/70 to-transparent px-4 pb-16 pt-[max(16px,env(safe-area-inset-top))] md:px-8">
               <div className="pointer-events-auto flex items-center gap-3">
                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-emerald-600 text-sm font-semibold shadow-lg">
@@ -2741,14 +3262,20 @@ export default function CallModal({
               </button>
             </div>
 
-            {/* SCREEN SHARING INDICATOR */}
+            {/* ================================================= */}
+            {/* LOCAL SCREEN SHARE INDICATOR */}
+            {/* ================================================= */}
+
             {screenSharing && (
               <div className="absolute left-1/2 top-[max(16px,env(safe-area-inset-top))] z-30 mt-12 -translate-x-1/2 rounded-full bg-black/60 px-4 py-2 text-xs font-medium backdrop-blur-md">
                 You are sharing your screen
               </div>
             )}
 
+            {/* ================================================= */}
             {/* LOCAL PREVIEW */}
+            {/* ================================================= */}
+
             <div className="absolute bottom-[112px] right-3 z-30 h-32 w-24 overflow-hidden rounded-xl border border-white/20 bg-[#3c4043] shadow-2xl sm:bottom-28 sm:right-5 sm:h-40 sm:w-32 md:h-44 md:w-56">
               {videoOff &&
               !screenSharing ? (
@@ -2943,6 +3470,7 @@ export default function CallModal({
             {phase === "active" && (
               <>
                 {/* MICROPHONE */}
+
                 <button
                   onClick={
                     toggleMute
@@ -2971,6 +3499,7 @@ export default function CallModal({
                 </button>
 
                 {/* CAMERA */}
+
                 {isVideo && (
                   <button
                     onClick={
@@ -3004,6 +3533,7 @@ export default function CallModal({
                 )}
 
                 {/* SCREEN SHARE */}
+
                 {isVideo && (
                   <button
                     onClick={() =>
@@ -3011,7 +3541,11 @@ export default function CallModal({
                         ? void stopScreenSharing()
                         : void startScreenSharing()
                     }
-                    className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full transition active:scale-95 sm:h-12 sm:w-12 ${
+                    disabled={
+                      screenStartingRef.current ||
+                      screenStoppingRef.current
+                    }
+                    className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-60 sm:h-12 sm:w-12 ${
                       screenSharing
                         ? "bg-white text-[#202124]"
                         : "bg-[#3c4043] text-white hover:bg-[#4a4d50]"
@@ -3036,6 +3570,7 @@ export default function CallModal({
                 )}
 
                 {/* SPEAKER */}
+
                 <div
                   className="hidden h-12 w-12 items-center justify-center rounded-full bg-[#3c4043] text-white sm:flex"
                   title="Speaker"
@@ -3045,6 +3580,7 @@ export default function CallModal({
                 </div>
 
                 {/* END CALL */}
+
                 <button
                   onClick={() =>
                     void endCall(
