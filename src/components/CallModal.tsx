@@ -75,13 +75,61 @@ export default function CallModal({
 
   const isVideo = callType === "video";
 
+  // ============================================================
+  // WEBRTC REFS
+  // ============================================================
+
   const pcRef = useRef<RTCPeerConnection | null>(null);
 
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
 
+  const localVideoSenderRef = useRef<RTCRtpSender | null>(null);
+  const localAudioSenderRef = useRef<RTCRtpSender | null>(null);
+
+  // ============================================================
+  // SCREEN SHARE REFS
+  // ============================================================
+
   const screenStreamRef = useRef<MediaStream | null>(null);
-  const videoSenderRef = useRef<RTCRtpSender | null>(null);
+
+  /*
+   * This is the video track sent to the receiver while sharing.
+   * It contains:
+   *
+   *     SCREEN
+   *     + small CAMERA overlay
+   */
+  const composedScreenStreamRef = useRef<MediaStream | null>(null);
+  const composedVideoTrackRef = useRef<MediaStreamTrack | null>(null);
+
+  /*
+   * Original microphone track is kept in localStreamRef.
+   * While sharing, audio is mixed:
+   *
+   *     microphone + screen/tab audio
+   */
+  const mixedAudioTrackRef = useRef<MediaStreamTrack | null>(null);
+
+  const screenAudioContextRef = useRef<AudioContext | null>(null);
+  const screenAudioDestinationRef =
+    useRef<MediaStreamAudioDestinationNode | null>(null);
+
+  const screenAnimationFrameRef =
+    useRef<number | null>(null);
+
+  const screenVideoElementRef =
+    useRef<HTMLVideoElement | null>(null);
+
+  const cameraVideoElementRef =
+    useRef<HTMLVideoElement | null>(null);
+
+  const screenCanvasRef =
+    useRef<HTMLCanvasElement | null>(null);
+
+  // ============================================================
+  // MEDIA ELEMENT REFS
+  // ============================================================
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -89,9 +137,15 @@ export default function CallModal({
 
   const ringtoneRef = useRef<HTMLAudioElement | null>(null);
 
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // ============================================================
+  // CALL REFS
+  // ============================================================
 
-  const callIdRef = useRef<string | null>(propCallId);
+  const timerRef =
+    useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const callIdRef =
+    useRef<string | null>(propCallId);
 
   const endedRef = useRef(false);
 
@@ -110,9 +164,10 @@ export default function CallModal({
   const callTypeRef = useRef<CallType>(callType);
   callTypeRef.current = callType;
 
-  /**
-   * Mark call active exactly once.
-   */
+  // ============================================================
+  // MARK ACTIVE
+  // ============================================================
+
   const markActive = useCallback(() => {
     if (endedRef.current) return;
     if (activeStartedRef.current) return;
@@ -135,170 +190,917 @@ export default function CallModal({
     }, 1000);
   }, []);
 
-  /**
-   * Stop screen sharing and return to camera.
-   */
+  // ============================================================
+  // STOP SCREEN SHARE
+  // ============================================================
+
   const stopScreenSharing = useCallback(async () => {
     const pc = pcRef.current;
-    const cameraStream = localStreamRef.current;
-    const screenStream = screenStreamRef.current;
 
-    if (screenStream) {
-      screenStream.getTracks().forEach((track) => {
-        try {
-          track.stop();
-        } catch {
-          // Ignore track stop errors.
-        }
-      });
+    const cameraStream =
+      localStreamRef.current;
+
+    const cameraTrack =
+      cameraStream?.getVideoTracks()[0] ?? null;
+
+    const microphoneTrack =
+      cameraStream?.getAudioTracks()[0] ?? null;
+
+    // ----------------------------------------------------------
+    // Stop animation frame
+    // ----------------------------------------------------------
+
+    if (screenAnimationFrameRef.current !== null) {
+      cancelAnimationFrame(
+        screenAnimationFrameRef.current
+      );
+
+      screenAnimationFrameRef.current = null;
     }
 
-    screenStreamRef.current = null;
+    // ----------------------------------------------------------
+    // Restore original camera
+    // ----------------------------------------------------------
 
-    if (pc && videoSenderRef.current && cameraStream) {
-      const cameraTrack = cameraStream.getVideoTracks()[0];
-
-      if (cameraTrack) {
-        try {
-          await videoSenderRef.current.replaceTrack(cameraTrack);
-        } catch (error) {
-          console.error(
-            "Failed to restore camera after screen sharing:",
-            error
-          );
-        }
+    if (
+      pc &&
+      localVideoSenderRef.current &&
+      cameraTrack
+    ) {
+      try {
+        await localVideoSenderRef.current.replaceTrack(
+          cameraTrack
+        );
+      } catch (error) {
+        console.error(
+          "Failed to restore camera:",
+          error
+        );
       }
+    }
+
+    // ----------------------------------------------------------
+    // Restore original microphone
+    // ----------------------------------------------------------
+
+    if (
+      pc &&
+      localAudioSenderRef.current &&
+      microphoneTrack
+    ) {
+      try {
+        await localAudioSenderRef.current.replaceTrack(
+          microphoneTrack
+        );
+      } catch (error) {
+        console.error(
+          "Failed to restore microphone:",
+          error
+        );
+      }
+    }
+
+    // ----------------------------------------------------------
+    // Stop composed video track
+    // ----------------------------------------------------------
+
+    if (composedVideoTrackRef.current) {
+      try {
+        composedVideoTrackRef.current.stop();
+      } catch {
+        // Ignore.
+      }
+
+      composedVideoTrackRef.current = null;
+    }
+
+    if (composedScreenStreamRef.current) {
+      composedScreenStreamRef.current
+        .getTracks()
+        .forEach((track) => {
+          try {
+            track.stop();
+          } catch {
+            // Ignore.
+          }
+        });
+
+      composedScreenStreamRef.current = null;
+    }
+
+    // ----------------------------------------------------------
+    // Stop screen capture
+    // ----------------------------------------------------------
+
+    if (screenStreamRef.current) {
+      screenStreamRef.current
+        .getTracks()
+        .forEach((track) => {
+          try {
+            track.stop();
+          } catch {
+            // Ignore.
+          }
+        });
+
+      screenStreamRef.current = null;
+    }
+
+    // ----------------------------------------------------------
+    // Stop screen audio mixing
+    // ----------------------------------------------------------
+
+    if (mixedAudioTrackRef.current) {
+      try {
+        mixedAudioTrackRef.current.stop();
+      } catch {
+        // Ignore.
+      }
+
+      mixedAudioTrackRef.current = null;
+    }
+
+    if (screenAudioContextRef.current) {
+      try {
+        await screenAudioContextRef.current.close();
+      } catch {
+        // Ignore.
+      }
+
+      screenAudioContextRef.current = null;
+    }
+
+    screenAudioDestinationRef.current = null;
+
+    screenVideoElementRef.current = null;
+    cameraVideoElementRef.current = null;
+    screenCanvasRef.current = null;
+
+    // ----------------------------------------------------------
+    // Restore local preview
+    // ----------------------------------------------------------
+
+    if (
+      localVideoRef.current &&
+      cameraStream
+    ) {
+      localVideoRef.current.srcObject =
+        cameraStream;
+
+      localVideoRef.current.muted = true;
+
+      localVideoRef.current
+        .play()
+        .catch(() => {
+          // Ignore autoplay errors.
+        });
     }
 
     setScreenSharing(false);
     setScreenShareError(null);
-
-    const localVideo = localVideoRef.current;
-
-    if (localVideo && cameraStream) {
-      localVideo.srcObject = cameraStream;
-
-      localVideo.play().catch(() => {
-        // Ignore autoplay errors.
-      });
-    }
   }, []);
 
-  /**
-   * Start Google Meet style screen sharing.
-   */
-  const startScreenSharing = useCallback(async () => {
-    if (!isVideo) return;
-    if (!pcRef.current) return;
-    if (!localStreamRef.current) return;
-    if (screenSharing) return;
-    if (!navigator.mediaDevices?.getDisplayMedia) {
-      setScreenShareError(
-        "Screen sharing is not supported by this browser."
-      );
-      return;
-    }
+  // ============================================================
+  // CREATE COMPOSED SCREEN + CAMERA VIDEO
+  // ============================================================
 
-    try {
-      setScreenShareError(null);
+  const createComposedScreenVideo =
+    useCallback(
+      async (
+        screenStream: MediaStream,
+        cameraStream: MediaStream
+      ): Promise<MediaStream> => {
+        const screenVideo =
+          document.createElement("video");
 
-      const screenStream =
-        await navigator.mediaDevices.getDisplayMedia({
-          video: {
-            frameRate: {
-              ideal: 30,
-              max: 60,
-            },
-          },
-          audio: true,
-        });
+        screenVideo.autoplay = true;
+        screenVideo.muted = true;
+        screenVideo.playsInline = true;
 
-      const screenTrack = screenStream.getVideoTracks()[0];
+        const cameraVideo =
+          document.createElement("video");
 
-      if (!screenTrack) {
-        screenStream.getTracks().forEach((track) => track.stop());
+        cameraVideo.autoplay = true;
+        cameraVideo.muted = true;
+        cameraVideo.playsInline = true;
 
-        throw new Error("Could not get screen video track.");
-      }
+        screenVideo.srcObject =
+          screenStream;
+
+        cameraVideo.srcObject =
+          cameraStream;
+
+        screenVideoElementRef.current =
+          screenVideo;
+
+        cameraVideoElementRef.current =
+          cameraVideo;
+
+        await Promise.all([
+          screenVideo.play(),
+          cameraVideo.play(),
+        ]);
+
+        const canvas =
+          document.createElement("canvas");
+
+        /*
+         * 16:9 canvas gives the receiver a stable video
+         * layout similar to Google Meet.
+         */
+        canvas.width = 1280;
+        canvas.height = 720;
+
+        screenCanvasRef.current =
+          canvas;
+
+        const context =
+          canvas.getContext("2d");
+
+        if (!context) {
+          throw new Error(
+            "Could not create screen sharing canvas."
+          );
+        }
+
+        const drawVideoContain = (
+          video: HTMLVideoElement,
+          x: number,
+          y: number,
+          width: number,
+          height: number
+        ) => {
+          if (
+            video.videoWidth <= 0 ||
+            video.videoHeight <= 0
+          ) {
+            return;
+          }
+
+          const sourceRatio =
+            video.videoWidth /
+            video.videoHeight;
+
+          const targetRatio =
+            width / height;
+
+          let drawWidth = width;
+          let drawHeight = height;
+
+          if (
+            sourceRatio >
+            targetRatio
+          ) {
+            drawWidth = width;
+            drawHeight =
+              width /
+              sourceRatio;
+          } else {
+            drawHeight = height;
+            drawWidth =
+              height *
+              sourceRatio;
+          }
+
+          const drawX =
+            x +
+            (width -
+              drawWidth) /
+              2;
+
+          const drawY =
+            y +
+            (height -
+              drawHeight) /
+              2;
+
+          context.drawImage(
+            video,
+            drawX,
+            drawY,
+            drawWidth,
+            drawHeight
+          );
+        };
+
+        const drawFrame = () => {
+          if (
+            endedRef.current ||
+            !screenStreamRef.current
+          ) {
+            return;
+          }
+
+          /*
+           * Background.
+           */
+          context.fillStyle =
+            "#000000";
+
+          context.fillRect(
+            0,
+            0,
+            canvas.width,
+            canvas.height
+          );
+
+          /*
+           * Main screen.
+           */
+          drawVideoContain(
+            screenVideo,
+            0,
+            0,
+            canvas.width,
+            canvas.height
+          );
+
+          /*
+           * Camera picture-in-picture.
+           *
+           * Approx. 25% of screen width.
+           */
+          const pipWidth = 300;
+          const pipHeight = 169;
+
+          const pipX =
+            canvas.width -
+            pipWidth -
+            28;
+
+          const pipY = 28;
+
+          /*
+           * Shadow / background.
+           */
+          context.fillStyle =
+            "rgba(0,0,0,0.45)";
+
+          context.fillRect(
+            pipX - 4,
+            pipY - 4,
+            pipWidth + 8,
+            pipHeight + 8
+          );
+
+          /*
+           * Camera.
+           */
+          drawVideoContain(
+            cameraVideo,
+            pipX,
+            pipY,
+            pipWidth,
+            pipHeight
+          );
+
+          /*
+           * Camera border.
+           */
+          context.strokeStyle =
+            "rgba(255,255,255,0.35)";
+
+          context.lineWidth = 3;
+
+          context.strokeRect(
+            pipX,
+            pipY,
+            pipWidth,
+            pipHeight
+          );
+
+          screenAnimationFrameRef.current =
+            requestAnimationFrame(
+              drawFrame
+            );
+        };
+
+        drawFrame();
+
+        if (
+          !canvas.captureStream
+        ) {
+          throw new Error(
+            "Canvas video capture is not supported by this browser."
+          );
+        }
+
+        const composedStream =
+          canvas.captureStream(30);
+
+        const composedVideoTrack =
+          composedStream.getVideoTracks()[0];
+
+        if (!composedVideoTrack) {
+          throw new Error(
+            "Could not create shared video track."
+          );
+        }
+
+        composedScreenStreamRef.current =
+          composedStream;
+
+        composedVideoTrackRef.current =
+          composedVideoTrack;
+
+        return composedStream;
+      },
+      []
+    );
+
+  // ============================================================
+  // MIX MICROPHONE + SCREEN AUDIO
+  // ============================================================
+
+  const createMixedScreenAudio =
+    useCallback(
+      async (
+        screenStream: MediaStream,
+        cameraStream: MediaStream
+      ): Promise<MediaStream | null> => {
+        const microphoneTrack =
+          cameraStream.getAudioTracks()[0];
+
+        const screenAudioTrack =
+          screenStream.getAudioTracks()[0];
+
+        /*
+         * If the browser did not provide screen audio,
+         * continue with microphone only.
+         */
+        if (!screenAudioTrack) {
+          return null;
+        }
+
+        const AudioContextClass =
+          window.AudioContext ||
+          (
+            window as typeof window & {
+              webkitAudioContext?: typeof AudioContext;
+            }
+          ).webkitAudioContext;
+
+        if (!AudioContextClass) {
+          console.warn(
+            "Web Audio API is not available."
+          );
+
+          return null;
+        }
+
+        const audioContext =
+          new AudioContextClass();
+
+        if (
+          audioContext.state ===
+          "suspended"
+        ) {
+          try {
+            await audioContext.resume();
+          } catch {
+            // Ignore.
+          }
+        }
+
+        const destination =
+          audioContext.createMediaStreamDestination();
+
+        /*
+         * Microphone.
+         */
+        if (microphoneTrack) {
+          const microphoneStream =
+            new MediaStream([
+              microphoneTrack,
+            ]);
+
+          const microphoneSource =
+            audioContext.createMediaStreamSource(
+              microphoneStream
+            );
+
+          microphoneSource.connect(
+            destination
+          );
+        }
+
+        /*
+         * Screen/tab/system audio.
+         */
+        const screenAudioOnlyStream =
+          new MediaStream([
+            screenAudioTrack,
+          ]);
+
+        const screenAudioSource =
+          audioContext.createMediaStreamSource(
+            screenAudioOnlyStream
+          );
+
+        screenAudioSource.connect(
+          destination
+        );
+
+        const mixedTrack =
+          destination.stream.getAudioTracks()[0];
+
+        if (!mixedTrack) {
+          await audioContext.close();
+
+          return null;
+        }
+
+        screenAudioContextRef.current =
+          audioContext;
+
+        screenAudioDestinationRef.current =
+          destination;
+
+        mixedAudioTrackRef.current =
+          mixedTrack;
+
+        return destination.stream;
+      },
+      []
+    );
+
+  // ============================================================
+  // START SCREEN SHARING
+  // ============================================================
+
+  const startScreenSharing =
+    useCallback(async () => {
+      if (!isVideo) return;
+
+      if (screenSharing) return;
 
       const pc = pcRef.current;
 
-      let videoSender = videoSenderRef.current;
+      const cameraStream =
+        localStreamRef.current;
 
-      if (!videoSender) {
-        videoSender =
-          pc
-            .getSenders()
-            .find(
-              (sender) =>
-                sender.track?.kind === "video"
-            ) ?? null;
-
-        videoSenderRef.current = videoSender;
+      if (!pc || !cameraStream) {
+        return;
       }
-
-      if (!videoSender) {
-        screenStream.getTracks().forEach((track) => track.stop());
-
-        throw new Error(
-          "Could not find the video connection."
-        );
-      }
-
-      await videoSender.replaceTrack(screenTrack);
-
-      screenStreamRef.current = screenStream;
-
-      setScreenSharing(true);
-
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = screenStream;
-
-        localVideoRef.current.play().catch(() => {
-          // Ignore autoplay errors.
-        });
-      }
-
-      /**
-       * Browser native Stop Sharing button.
-       */
-      screenTrack.onended = () => {
-        void stopScreenSharing();
-      };
-    } catch (error) {
-      console.error(
-        "Screen sharing failed:",
-        error
-      );
 
       if (
-        error instanceof DOMException &&
-        error.name === "NotAllowedError"
+        !navigator.mediaDevices?.getDisplayMedia
       ) {
         setScreenShareError(
-          "Screen sharing was cancelled."
+          "This browser/device does not provide screen sharing. Try the latest desktop Chrome or Edge."
         );
-      } else {
-        setScreenShareError(
-          "Could not start screen sharing."
-        );
+
+        return;
       }
 
-      setScreenSharing(false);
-    }
-  }, [
-    isVideo,
-    screenSharing,
-    stopScreenSharing,
-  ]);
+      try {
+        setScreenShareError(null);
 
-  /**
-   * Cleanup all WebRTC resources.
-   */
+        /*
+         * Request screen.
+         *
+         * audio:true allows Chrome/Edge to offer
+         * tab/system audio where supported.
+         */
+        const screenStream =
+          await navigator.mediaDevices.getDisplayMedia(
+            {
+              video: {
+                frameRate: {
+                  ideal: 30,
+                  max: 60,
+                },
+              },
+              audio: true,
+            }
+          );
+
+        const screenTrack =
+          screenStream.getVideoTracks()[0];
+
+        if (!screenTrack) {
+          screenStream
+            .getTracks()
+            .forEach((track) =>
+              track.stop()
+            );
+
+          throw new Error(
+            "No screen video was selected."
+          );
+        }
+
+        screenStreamRef.current =
+          screenStream;
+
+        /*
+         * ------------------------------------------------------
+         * Create SCREEN + CAMERA composed video.
+         * ------------------------------------------------------
+         */
+        const composedStream =
+          await createComposedScreenVideo(
+            screenStream,
+            cameraStream
+          );
+
+        const composedVideoTrack =
+          composedStream.getVideoTracks()[0];
+
+        if (!composedVideoTrack) {
+          throw new Error(
+            "Could not create shared video."
+          );
+        }
+
+        /*
+         * ------------------------------------------------------
+         * Replace camera video with composed screen+camera.
+         * ------------------------------------------------------
+         */
+        if (
+          localVideoSenderRef.current
+        ) {
+          await localVideoSenderRef.current.replaceTrack(
+            composedVideoTrack
+          );
+        } else {
+          throw new Error(
+            "Could not find the video connection."
+          );
+        }
+
+        /*
+         * ------------------------------------------------------
+         * Mix microphone + screen audio.
+         * ------------------------------------------------------
+         */
+        const mixedAudioStream =
+          await createMixedScreenAudio(
+            screenStream,
+            cameraStream
+          );
+
+        if (
+          mixedAudioStream &&
+          localAudioSenderRef.current
+        ) {
+          const mixedTrack =
+            mixedAudioStream.getAudioTracks()[0];
+
+          if (mixedTrack) {
+            await localAudioSenderRef.current.replaceTrack(
+              mixedTrack
+            );
+          }
+        }
+
+        setScreenSharing(true);
+
+        /*
+         * Local preview should show the same
+         * screen + camera composition.
+         */
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject =
+            composedStream;
+
+          localVideoRef.current.muted =
+            true;
+
+          localVideoRef.current
+            .play()
+            .catch(() => {
+              // Ignore autoplay errors.
+            });
+        }
+
+        /*
+         * ------------------------------------------------------
+         * Browser native "Stop sharing".
+         * ------------------------------------------------------
+         */
+        screenTrack.onended = () => {
+          void stopScreenSharing();
+        };
+
+        /*
+         * Screen audio can also end independently.
+         */
+        const screenAudioTrack =
+          screenStream.getAudioTracks()[0];
+
+        if (screenAudioTrack) {
+          screenAudioTrack.onended = () => {
+            /*
+             * Do NOT stop the entire screen share if only
+             * the audio track ended.
+             *
+             * The video screen may still be active.
+             */
+          };
+        }
+      } catch (error) {
+        console.error(
+          "Screen sharing failed:",
+          error
+        );
+
+        /*
+         * Clean up anything partially created.
+         */
+        if (
+          screenAnimationFrameRef.current !==
+          null
+        ) {
+          cancelAnimationFrame(
+            screenAnimationFrameRef.current
+          );
+
+          screenAnimationFrameRef.current =
+            null;
+        }
+
+        if (
+          screenStreamRef.current
+        ) {
+          screenStreamRef.current
+            .getTracks()
+            .forEach((track) => {
+              try {
+                track.stop();
+              } catch {
+                // Ignore.
+              }
+            });
+
+          screenStreamRef.current =
+            null;
+        }
+
+        if (
+          composedVideoTrackRef.current
+        ) {
+          try {
+            composedVideoTrackRef.current.stop();
+          } catch {
+            // Ignore.
+          }
+
+          composedVideoTrackRef.current =
+            null;
+        }
+
+        if (
+          composedScreenStreamRef.current
+        ) {
+          composedScreenStreamRef.current
+            .getTracks()
+            .forEach((track) => {
+              try {
+                track.stop();
+              } catch {
+                // Ignore.
+              }
+            });
+
+          composedScreenStreamRef.current =
+            null;
+        }
+
+        if (
+          screenAudioContextRef.current
+        ) {
+          try {
+            await screenAudioContextRef.current.close();
+          } catch {
+            // Ignore.
+          }
+
+          screenAudioContextRef.current =
+            null;
+        }
+
+        mixedAudioTrackRef.current =
+          null;
+
+        /*
+         * Restore camera/mic if necessary.
+         */
+        const cameraTrack =
+          cameraStream.getVideoTracks()[0];
+
+        const microphoneTrack =
+          cameraStream.getAudioTracks()[0];
+
+        if (
+          localVideoSenderRef.current &&
+          cameraTrack
+        ) {
+          try {
+            await localVideoSenderRef.current.replaceTrack(
+              cameraTrack
+            );
+          } catch {
+            // Ignore.
+          }
+        }
+
+        if (
+          localAudioSenderRef.current &&
+          microphoneTrack
+        ) {
+          try {
+            await localAudioSenderRef.current.replaceTrack(
+              microphoneTrack
+            );
+          } catch {
+            // Ignore.
+          }
+        }
+
+        if (
+          error instanceof DOMException &&
+          error.name ===
+            "NotAllowedError"
+        ) {
+          setScreenShareError(
+            "Screen sharing was cancelled."
+          );
+        } else if (
+          error instanceof DOMException &&
+          error.name ===
+            "AbortError"
+        ) {
+          setScreenShareError(
+            "Screen sharing was cancelled."
+          );
+        } else {
+          setScreenShareError(
+            error instanceof Error
+              ? error.message
+              : "Could not start screen sharing."
+          );
+        }
+
+        setScreenSharing(false);
+      }
+    }, [
+      cameraVideoElementRef,
+      createComposedScreenVideo,
+      createMixedScreenAudio,
+      isVideo,
+      screenSharing,
+      stopScreenSharing,
+    ]);
+
+  // ============================================================
+  // CLEANUP
+  // ============================================================
+
   const cleanup = useCallback(() => {
     if (timerRef.current) {
       clearInterval(timerRef.current);
       timerRef.current = null;
+    }
+
+    if (
+      screenAnimationFrameRef.current !==
+      null
+    ) {
+      cancelAnimationFrame(
+        screenAnimationFrameRef.current
+      );
+
+      screenAnimationFrameRef.current =
+        null;
+    }
+
+    if (
+      screenAudioContextRef.current
+    ) {
+      screenAudioContextRef.current
+        .close()
+        .catch(() => {
+          // Ignore.
+        });
+
+      screenAudioContextRef.current =
+        null;
+    }
+
+    screenAudioDestinationRef.current =
+      null;
+
+    if (mixedAudioTrackRef.current) {
+      try {
+        mixedAudioTrackRef.current.stop();
+      } catch {
+        // Ignore.
+      }
+
+      mixedAudioTrackRef.current =
+        null;
     }
 
     if (screenStreamRef.current) {
@@ -308,29 +1110,60 @@ export default function CallModal({
           try {
             track.stop();
           } catch {
-            // Ignore track stop errors.
+            // Ignore.
           }
         });
 
       screenStreamRef.current = null;
     }
 
+    if (
+      composedScreenStreamRef.current
+    ) {
+      composedScreenStreamRef.current
+        .getTracks()
+        .forEach((track) => {
+          try {
+            track.stop();
+          } catch {
+            // Ignore.
+          }
+        });
+
+      composedScreenStreamRef.current =
+        null;
+    }
+
+    if (composedVideoTrackRef.current) {
+      try {
+        composedVideoTrackRef.current.stop();
+      } catch {
+        // Ignore.
+      }
+
+      composedVideoTrackRef.current =
+        null;
+    }
+
     if (pcRef.current) {
       pcRef.current.ontrack = null;
       pcRef.current.onicecandidate = null;
-      pcRef.current.onconnectionstatechange = null;
-      pcRef.current.oniceconnectionstatechange = null;
+      pcRef.current.onconnectionstatechange =
+        null;
+      pcRef.current.oniceconnectionstatechange =
+        null;
 
       try {
         pcRef.current.close();
       } catch {
-        // Ignore close errors.
+        // Ignore.
       }
 
       pcRef.current = null;
     }
 
-    videoSenderRef.current = null;
+    localVideoSenderRef.current = null;
+    localAudioSenderRef.current = null;
 
     if (localStreamRef.current) {
       localStreamRef.current
@@ -339,7 +1172,7 @@ export default function CallModal({
           try {
             track.stop();
           } catch {
-            // Ignore track stop errors.
+            // Ignore.
           }
         });
 
@@ -347,46 +1180,64 @@ export default function CallModal({
     }
 
     if (localVideoRef.current) {
-      localVideoRef.current.onloadedmetadata = null;
-      localVideoRef.current.srcObject = null;
+      localVideoRef.current.onloadedmetadata =
+        null;
+
+      localVideoRef.current.srcObject =
+        null;
+    }
+
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.onloadedmetadata =
+        null;
+
+      remoteVideoRef.current.srcObject =
+        null;
+    }
+
+    if (remoteAudioRef.current) {
+      remoteAudioRef.current.srcObject =
+        null;
     }
 
     remoteStreamRef.current = null;
 
-    if (remoteVideoRef.current) {
-      remoteVideoRef.current.onloadedmetadata = null;
-      remoteVideoRef.current.srcObject = null;
-    }
-
-    if (remoteAudioRef.current) {
-      remoteAudioRef.current.srcObject = null;
-    }
-
     if (ringtoneRef.current) {
       ringtoneRef.current.pause();
-      ringtoneRef.current.currentTime = 0;
+      ringtoneRef.current.currentTime =
+        0;
     }
+
+    screenVideoElementRef.current =
+      null;
+
+    cameraVideoElementRef.current =
+      null;
+
+    screenCanvasRef.current = null;
 
     setScreenSharing(false);
   }, []);
 
-  /**
-   * Update call row.
-   */
+  // ============================================================
+  // UPDATE CALL
+  // ============================================================
+
   const updateCall = useCallback(
     async (
       id: string,
       updates: Record<string, unknown>
     ) => {
-      const { error: updateError } =
-        await supabase
-          .from("call_signaling")
-          .update({
-            ...updates,
-            updated_at:
-              new Date().toISOString(),
-          })
-          .eq("id", id);
+      const {
+        error: updateError,
+      } = await supabase
+        .from("call_signaling")
+        .update({
+          ...updates,
+          updated_at:
+            new Date().toISOString(),
+        })
+        .eq("id", id);
 
       if (updateError) {
         console.error(
@@ -398,9 +1249,10 @@ export default function CallModal({
     []
   );
 
-  /**
-   * End call safely.
-   */
+  // ============================================================
+  // END CALL
+  // ============================================================
+
   const endCall = useCallback(
     async (
       reason:
@@ -419,9 +1271,12 @@ export default function CallModal({
         callIdRef.current;
 
       if (currentCallId) {
-        await updateCall(currentCallId, {
-          status: reason,
-        });
+        await updateCall(
+          currentCallId,
+          {
+            status: reason,
+          }
+        );
       }
 
       cleanup();
@@ -437,182 +1292,228 @@ export default function CallModal({
     [cleanup, updateCall]
   );
 
-  /**
-   * Wait for ICE gathering.
-   */
-  const waitForIceGathering = useCallback(
-    async (pc: RTCPeerConnection) => {
-      if (
-        pc.iceGatheringState ===
-        "complete"
-      ) {
-        return;
-      }
+  // ============================================================
+  // ICE GATHERING
+  // ============================================================
 
-      await new Promise<void>((resolve) => {
-        let resolved = false;
+  const waitForIceGathering =
+    useCallback(
+      async (
+        pc: RTCPeerConnection
+      ) => {
+        if (
+          pc.iceGatheringState ===
+          "complete"
+        ) {
+          return;
+        }
 
-        const finish = () => {
-          if (resolved) return;
+        await new Promise<void>(
+          (resolve) => {
+            let resolved = false;
 
-          resolved = true;
+            const finish = () => {
+              if (resolved) return;
 
-          pc.removeEventListener(
-            "icegatheringstatechange",
-            checkState
-          );
+              resolved = true;
 
-          resolve();
-        };
+              pc.removeEventListener(
+                "icegatheringstatechange",
+                checkState
+              );
 
-        const checkState = () => {
-          if (
-            pc.iceGatheringState ===
-            "complete"
-          ) {
-            finish();
-          }
-        };
+              resolve();
+            };
 
-        pc.addEventListener(
-          "icegatheringstatechange",
-          checkState
-        );
+            const checkState = () => {
+              if (
+                pc.iceGatheringState ===
+                "complete"
+              ) {
+                finish();
+              }
+            };
 
-        setTimeout(finish, 5000);
-      });
-    },
-    []
-  );
+            pc.addEventListener(
+              "icegatheringstatechange",
+              checkState
+            );
 
-  /**
-   * Parse ICE candidates.
-   */
-  const parseIceCandidates = useCallback(
-    (value: unknown): string[] => {
-      if (!value) return [];
-
-      try {
-        if (typeof value === "string") {
-          const parsed = JSON.parse(value);
-
-          if (Array.isArray(parsed)) {
-            return parsed.filter(
-              (item): item is string =>
-                typeof item === "string"
+            setTimeout(
+              finish,
+              5000
             );
           }
-
-          return [];
-        }
-
-        if (Array.isArray(value)) {
-          return value.filter(
-            (item): item is string =>
-              typeof item === "string"
-          );
-        }
-      } catch (error) {
-        console.error(
-          "Failed to parse ICE candidates:",
-          error
         );
-      }
+      },
+      []
+    );
 
-      return [];
-    },
-    []
-  );
+  // ============================================================
+  // PARSE ICE
+  // ============================================================
 
-  /**
-   * Add remote ICE candidates.
-   */
-  const addIceCandidates = useCallback(
-    async (
-      pc: RTCPeerConnection,
-      candidates: unknown
-    ) => {
-      const iceCandidates =
-        parseIceCandidates(candidates);
+  const parseIceCandidates =
+    useCallback(
+      (value: unknown): string[] => {
+        if (!value) return [];
 
-      for (const candidateString of iceCandidates) {
         try {
-          const candidate =
-            JSON.parse(candidateString);
+          if (
+            typeof value === "string"
+          ) {
+            const parsed =
+              JSON.parse(value);
 
-          await pc.addIceCandidate(
-            candidate
-          );
+            if (
+              Array.isArray(parsed)
+            ) {
+              return parsed.filter(
+                (
+                  item
+                ): item is string =>
+                  typeof item ===
+                  "string"
+              );
+            }
+
+            return [];
+          }
+
+          if (
+            Array.isArray(value)
+          ) {
+            return value.filter(
+              (
+                item
+              ): item is string =>
+                typeof item ===
+                "string"
+            );
+          }
         } catch (error) {
-          console.warn(
-            "Could not add remote ICE candidate:",
+          console.error(
+            "Failed to parse ICE candidates:",
             error
           );
         }
-      }
-    },
-    [parseIceCandidates]
-  );
 
-  /**
-   * Attach remote stream.
-   */
-  const attachRemoteStream = useCallback(
-    (stream: MediaStream) => {
-      remoteStreamRef.current = stream;
+        return [];
+      },
+      []
+    );
 
-      if (
-        callTypeRef.current === "video"
-      ) {
-        const video =
-          remoteVideoRef.current;
+  // ============================================================
+  // ADD ICE
+  // ============================================================
 
-        if (video) {
-          video.srcObject = stream;
+  const addIceCandidates =
+    useCallback(
+      async (
+        pc: RTCPeerConnection,
+        candidates: unknown
+      ) => {
+        const iceCandidates =
+          parseIceCandidates(
+            candidates
+          );
 
-          const playVideo = () => {
-            video
-              .play()
-              .catch((error) => {
-                console.warn(
-                  "Remote video playback was blocked:",
-                  error
-                );
-              });
-          };
+        for (
+          const candidateString of
+            iceCandidates
+        ) {
+          try {
+            const candidate =
+              JSON.parse(
+                candidateString
+              );
 
-          if (
-            video.readyState >=
-            HTMLMediaElement.HAVE_METADATA
-          ) {
-            playVideo();
-          } else {
-            video.onloadedmetadata =
-              playVideo;
+            await pc.addIceCandidate(
+              candidate
+            );
+          } catch (error) {
+            console.warn(
+              "Could not add remote ICE candidate:",
+              error
+            );
           }
         }
-      } else {
-        if (remoteAudioRef.current) {
-          remoteAudioRef.current.srcObject =
-            stream;
+      },
+      [parseIceCandidates]
+    );
 
-          remoteAudioRef.current
-            .play()
-            .catch(() => {
-              // Browser may require interaction.
-            });
+  // ============================================================
+  // ATTACH REMOTE STREAM
+  // ============================================================
+
+  const attachRemoteStream =
+    useCallback(
+      (stream: MediaStream) => {
+        remoteStreamRef.current =
+          stream;
+
+        if (
+          callTypeRef.current ===
+          "video"
+        ) {
+          const video =
+            remoteVideoRef.current;
+
+          if (video) {
+            video.srcObject =
+              stream;
+
+            const playVideo =
+              () => {
+                video
+                  .play()
+                  .catch(
+                    (error) => {
+                      console.warn(
+                        "Remote video playback was blocked:",
+                        error
+                      );
+                    }
+                  );
+              };
+
+            if (
+              video.readyState >=
+              HTMLMediaElement.HAVE_METADATA
+            ) {
+              playVideo();
+            } else {
+              video.onloadedmetadata =
+                playVideo;
+            }
+          }
+        } else {
+          if (
+            remoteAudioRef.current
+          ) {
+            remoteAudioRef.current.srcObject =
+              stream;
+
+            remoteAudioRef.current
+              .play()
+              .catch(() => {
+                // Browser may require interaction.
+              });
+          }
         }
-      }
-    },
-    []
-  );
+      },
+      []
+    );
 
-  /**
-   * Configure connection handlers.
-   */
+  // ============================================================
+  // CONNECTION HANDLERS
+  // ============================================================
+
   const configureConnectionHandlers =
     useCallback(
-      (pc: RTCPeerConnection) => {
+      (
+        pc: RTCPeerConnection
+      ) => {
         pc.onconnectionstatechange =
           () => {
             const state =
@@ -634,8 +1535,12 @@ export default function CallModal({
               state === "failed" ||
               state === "closed"
             ) {
-              if (!endedRef.current) {
-                void endCall("ended");
+              if (
+                !endedRef.current
+              ) {
+                void endCall(
+                  "ended"
+                );
               }
             }
           };
@@ -657,9 +1562,15 @@ export default function CallModal({
               markActive();
             }
 
-            if (state === "failed") {
-              if (!endedRef.current) {
-                void endCall("ended");
+            if (
+              state === "failed"
+            ) {
+              if (
+                !endedRef.current
+              ) {
+                void endCall(
+                  "ended"
+                );
               }
             }
           };
@@ -675,11 +1586,14 @@ export default function CallModal({
     useCallback(async () => {
       if (endedRef.current) return;
 
-      if (outgoingStartedRef.current) {
+      if (
+        outgoingStartedRef.current
+      ) {
         return;
       }
 
-      outgoingStartedRef.current = true;
+      outgoingStartedRef.current =
+        true;
 
       try {
         setError(null);
@@ -698,7 +1612,8 @@ export default function CallModal({
           await navigator.mediaDevices.getUserMedia(
             {
               audio: true,
-              video: callType === "video",
+              video:
+                callType === "video",
             }
           );
 
@@ -717,12 +1632,15 @@ export default function CallModal({
 
         const pc =
           new RTCPeerConnection({
-            iceServers: ICE_SERVERS,
+            iceServers:
+              ICE_SERVERS,
           });
 
         pcRef.current = pc;
 
-        configureConnectionHandlers(pc);
+        configureConnectionHandlers(
+          pc
+        );
 
         stream
           .getTracks()
@@ -734,9 +1652,18 @@ export default function CallModal({
               );
 
             if (
-              track.kind === "video"
+              track.kind ===
+              "video"
             ) {
-              videoSenderRef.current =
+              localVideoSenderRef.current =
+                sender;
+            }
+
+            if (
+              track.kind ===
+              "audio"
+            ) {
+              localAudioSenderRef.current =
                 sender;
             }
           });
@@ -759,7 +1686,9 @@ export default function CallModal({
         pc.onicecandidate = (
           event
         ) => {
-          if (event.candidate) {
+          if (
+            event.candidate
+          ) {
             callerIce.push(
               JSON.stringify(
                 event.candidate
@@ -779,7 +1708,9 @@ export default function CallModal({
           pc
         );
 
-        if (endedRef.current) {
+        if (
+          endedRef.current
+        ) {
           return;
         }
 
@@ -796,7 +1727,9 @@ export default function CallModal({
           data,
           error: insertError,
         } = await supabase
-          .from("call_signaling")
+          .from(
+            "call_signaling"
+          )
           .insert({
             chat_id: chatId,
             caller_id: myId,
@@ -807,7 +1740,8 @@ export default function CallModal({
               JSON.stringify(
                 localDescription
               ),
-            caller_ice: callerIce,
+            caller_ice:
+              callerIce,
           })
           .select()
           .single();
@@ -828,7 +1762,9 @@ export default function CallModal({
           outgoingStartedRef.current =
             false;
 
-          await endCall("ended");
+          await endCall(
+            "ended"
+          );
 
           return;
         }
@@ -839,7 +1775,9 @@ export default function CallModal({
         callIdRef.current =
           newCall.id;
 
-        setCallId(newCall.id);
+        setCallId(
+          newCall.id
+        );
 
         console.log(
           "Outgoing call created:",
@@ -851,7 +1789,9 @@ export default function CallModal({
           error
         );
 
-        if (!endedRef.current) {
+        if (
+          !endedRef.current
+        ) {
           setError(
             "Could not access camera/microphone. Please check browser permissions."
           );
@@ -859,7 +1799,9 @@ export default function CallModal({
           outgoingStartedRef.current =
             false;
 
-          await endCall("ended");
+          await endCall(
+            "ended"
+          );
         }
       }
     }, [
@@ -882,16 +1824,22 @@ export default function CallModal({
       if (!incomingCall) return;
       if (endedRef.current) return;
 
-      if (acceptStartedRef.current) {
+      if (
+        acceptStartedRef.current
+      ) {
         return;
       }
 
-      acceptStartedRef.current = true;
+      acceptStartedRef.current =
+        true;
 
       phaseRef.current =
         "connecting";
 
-      setPhase("connecting");
+      setPhase(
+        "connecting"
+      );
+
       setError(null);
 
       try {
@@ -915,7 +1863,9 @@ export default function CallModal({
             }
           );
 
-        if (endedRef.current) {
+        if (
+          endedRef.current
+        ) {
           stream
             .getTracks()
             .forEach((track) =>
@@ -930,12 +1880,15 @@ export default function CallModal({
 
         const pc =
           new RTCPeerConnection({
-            iceServers: ICE_SERVERS,
+            iceServers:
+              ICE_SERVERS,
           });
 
         pcRef.current = pc;
 
-        configureConnectionHandlers(pc);
+        configureConnectionHandlers(
+          pc
+        );
 
         stream
           .getTracks()
@@ -947,9 +1900,18 @@ export default function CallModal({
               );
 
             if (
-              track.kind === "video"
+              track.kind ===
+              "video"
             ) {
-              videoSenderRef.current =
+              localVideoSenderRef.current =
+                sender;
+            }
+
+            if (
+              track.kind ===
+              "audio"
+            ) {
+              localAudioSenderRef.current =
                 sender;
             }
           });
@@ -972,7 +1934,9 @@ export default function CallModal({
         pc.onicecandidate = (
           event
         ) => {
-          if (event.candidate) {
+          if (
+            event.candidate
+          ) {
             calleeIce.push(
               JSON.stringify(
                 event.candidate
@@ -1011,7 +1975,9 @@ export default function CallModal({
           pc
         );
 
-        if (endedRef.current) {
+        if (
+          endedRef.current
+        ) {
           return;
         }
 
@@ -1027,7 +1993,8 @@ export default function CallModal({
         await updateCall(
           incomingCall.id,
           {
-            status: "accepted",
+            status:
+              "accepted",
             sdp_answer:
               JSON.stringify(
                 localDescription
@@ -1072,7 +2039,9 @@ export default function CallModal({
         acceptStartedRef.current =
           false;
 
-        await endCall("ended");
+        await endCall(
+          "ended"
+        );
       }
     }, [
       addIceCandidates,
@@ -1095,7 +2064,9 @@ export default function CallModal({
       phase !== "incoming" ||
       endedRef.current
     ) {
-      if (ringtoneRef.current) {
+      if (
+        ringtoneRef.current
+      ) {
         ringtoneRef.current.pause();
         ringtoneRef.current.currentTime =
           0;
@@ -1115,7 +2086,9 @@ export default function CallModal({
     const playRingtone =
       async () => {
         try {
-          ringtone.currentTime = 0;
+          ringtone.currentTime =
+            0;
+
           await ringtone.play();
         } catch (error) {
           console.warn(
@@ -1129,7 +2102,8 @@ export default function CallModal({
 
     return () => {
       ringtone.pause();
-      ringtone.currentTime = 0;
+      ringtone.currentTime =
+        0;
     };
   }, [isCaller, phase]);
 
@@ -1161,28 +2135,38 @@ export default function CallModal({
     let cancelled = false;
 
     const processCallUpdate =
-      async (row: CallSignaling) => {
+      async (
+        row: CallSignaling
+      ) => {
         if (cancelled) return;
         if (endedRef.current) return;
 
         if (
-          row.status === "declined" ||
-          row.status === "ended" ||
-          row.status === "missed"
+          row.status ===
+            "declined" ||
+          row.status ===
+            "ended" ||
+          row.status ===
+            "missed"
         ) {
-          await endCall("ended");
+          await endCall(
+            "ended"
+          );
+
           return;
         }
 
         if (
-          row.status !== "accepted" ||
+          row.status !==
+            "accepted" ||
           !row.sdp_answer ||
           !pcRef.current
         ) {
           return;
         }
 
-        const pc = pcRef.current;
+        const pc =
+          pcRef.current;
 
         if (
           !answerAppliedRef.current
@@ -1226,57 +2210,71 @@ export default function CallModal({
         }
       };
 
-    const channel = supabase
-      .channel(
-        `call-answer-${cid}`
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "call_signaling",
-          filter: `id=eq.${cid}`,
-        },
-        async (payload) => {
-          await processCallUpdate(
-            payload.new as CallSignaling
-          );
-        }
-      )
-      .subscribe();
+    const channel =
+      supabase
+        .channel(
+          `call-answer-${cid}`
+        )
+        .on(
+          "postgres_changes",
+          {
+            event: "UPDATE",
+            schema: "public",
+            table:
+              "call_signaling",
+            filter: `id=eq.${cid}`,
+          },
+          async (
+            payload
+          ) => {
+            await processCallUpdate(
+              payload.new as CallSignaling
+            );
+          }
+        )
+        .subscribe();
 
     const pollInterval =
-      setInterval(async () => {
-        if (cancelled) return;
-        if (endedRef.current) return;
+      setInterval(
+        async () => {
+          if (cancelled) return;
+          if (endedRef.current)
+            return;
 
-        const {
-          data,
-          error: pollError,
-        } = await supabase
-          .from("call_signaling")
-          .select(
-            "id, status, sdp_answer, callee_ice"
-          )
-          .eq("id", cid)
-          .maybeSingle();
+          const {
+            data,
+            error:
+              pollError,
+          } = await supabase
+            .from(
+              "call_signaling"
+            )
+            .select(
+              "id, status, sdp_answer, callee_ice"
+            )
+            .eq(
+              "id",
+              cid
+            )
+            .maybeSingle();
 
-        if (pollError) {
-          console.warn(
-            "Call polling error:",
-            pollError
+          if (pollError) {
+            console.warn(
+              "Call polling error:",
+              pollError
+            );
+
+            return;
+          }
+
+          if (!data) return;
+
+          await processCallUpdate(
+            data as CallSignaling
           );
-
-          return;
-        }
-
-        if (!data) return;
-
-        await processCallUpdate(
-          data as CallSignaling
-        );
-      }, 1500);
+        },
+        1500
+      );
 
     return () => {
       cancelled = true;
@@ -1305,74 +2303,95 @@ export default function CallModal({
     if (isCaller) return;
     if (!incomingCall) return;
 
-    const cid = incomingCall.id;
+    const cid =
+      incomingCall.id;
 
     let cancelled = false;
 
     const handleRemoteStatus =
-      async (row: CallSignaling) => {
+      async (
+        row: CallSignaling
+      ) => {
         if (cancelled) return;
         if (endedRef.current) return;
 
         if (
-          row.status === "ended" ||
-          row.status === "missed"
+          row.status ===
+            "ended" ||
+          row.status ===
+            "missed"
         ) {
-          await endCall("ended");
+          await endCall(
+            "ended"
+          );
         }
       };
 
-    const channel = supabase
-      .channel(
-        `call-remote-end-${cid}`
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "call_signaling",
-          filter: `id=eq.${cid}`,
-        },
-        async (payload) => {
-          await handleRemoteStatus(
-            payload.new as CallSignaling
-          );
-        }
-      )
-      .subscribe();
+    const channel =
+      supabase
+        .channel(
+          `call-remote-end-${cid}`
+        )
+        .on(
+          "postgres_changes",
+          {
+            event: "UPDATE",
+            schema: "public",
+            table:
+              "call_signaling",
+            filter: `id=eq.${cid}`,
+          },
+          async (
+            payload
+          ) => {
+            await handleRemoteStatus(
+              payload.new as CallSignaling
+            );
+          }
+        )
+        .subscribe();
 
     const pollInterval =
-      setInterval(async () => {
-        if (cancelled) return;
-        if (endedRef.current) return;
+      setInterval(
+        async () => {
+          if (cancelled) return;
+          if (endedRef.current)
+            return;
 
-        const {
-          data,
-          error: pollError,
-        } = await supabase
-          .from("call_signaling")
-          .select(
-            "id, status"
-          )
-          .eq("id", cid)
-          .maybeSingle();
+          const {
+            data,
+            error:
+              pollError,
+          } = await supabase
+            .from(
+              "call_signaling"
+            )
+            .select(
+              "id, status"
+            )
+            .eq(
+              "id",
+              cid
+            )
+            .maybeSingle();
 
-        if (pollError) {
-          console.warn(
-            "Incoming call polling error:",
-            pollError
+          if (pollError) {
+            console.warn(
+              "Incoming call polling error:",
+              pollError
+            );
+
+            return;
+          }
+
+          if (!data) return;
+
+          await handleRemoteStatus(
+            data as CallSignaling
           );
-
-          return;
-        }
-
-        if (!data) return;
-
-        await handleRemoteStatus(
-          data as CallSignaling
-        );
-      }, 1500);
+        },
+        1500
+      );
 
     return () => {
       cancelled = true;
@@ -1398,20 +2417,26 @@ export default function CallModal({
   useEffect(() => {
     if (!isCaller) return;
     if (!callId) return;
-    if (phase !== "outgoing") return;
+    if (phase !== "outgoing")
+      return;
 
-    const timeout = setTimeout(() => {
-      if (
-        !endedRef.current &&
-        phaseRef.current ===
-          "outgoing"
-      ) {
-        void endCall("missed");
-      }
-    }, 45000);
+    const timeout =
+      setTimeout(() => {
+        if (
+          !endedRef.current &&
+          phaseRef.current ===
+            "outgoing"
+        ) {
+          void endCall(
+            "missed"
+          );
+        }
+      }, 45000);
 
     return () => {
-      clearTimeout(timeout);
+      clearTimeout(
+        timeout
+      );
     };
   }, [
     callId,
@@ -1426,7 +2451,8 @@ export default function CallModal({
 
   useEffect(() => {
     if (!isVideo) return;
-    if (phase !== "active") return;
+    if (phase !== "active")
+      return;
 
     const localStream =
       localStreamRef.current;
@@ -1442,11 +2468,14 @@ export default function CallModal({
       localVideo.srcObject =
         localStream;
 
-      localVideo.muted = true;
+      localVideo.muted =
+        true;
 
-      localVideo.play().catch(() => {
-        // Ignore autoplay errors.
-      });
+      localVideo
+        .play()
+        .catch(() => {
+          // Ignore autoplay errors.
+        });
     }
 
     const remoteStream =
@@ -1495,7 +2524,7 @@ export default function CallModal({
   ]);
 
   // ============================================================
-  // CLEANUP
+  // CLEANUP ON UNMOUNT
   // ============================================================
 
   useEffect(() => {
@@ -1505,7 +2534,7 @@ export default function CallModal({
   }, [cleanup]);
 
   // ============================================================
-  // CONTROLS
+  // MUTE
   // ============================================================
 
   function toggleMute() {
@@ -1517,10 +2546,15 @@ export default function CallModal({
     const audioTracks =
       stream.getAudioTracks();
 
-    if (audioTracks.length === 0)
+    if (
+      audioTracks.length ===
+      0
+    ) {
       return;
+    }
 
-    const nextMuted = !muted;
+    const nextMuted =
+      !muted;
 
     audioTracks.forEach(
       (track) => {
@@ -1529,8 +2563,19 @@ export default function CallModal({
       }
     );
 
+    /*
+     * If screen sharing is active, the microphone
+     * source is mixed through Web Audio.
+     *
+     * Disabling the original microphone track
+     * therefore also removes it from the mixed audio.
+     */
     setMuted(nextMuted);
   }
+
+  // ============================================================
+  // VIDEO
+  // ============================================================
 
   function toggleVideo() {
     if (screenSharing) return;
@@ -1543,8 +2588,12 @@ export default function CallModal({
     const videoTracks =
       stream.getVideoTracks();
 
-    if (videoTracks.length === 0)
+    if (
+      videoTracks.length ===
+      0
+    ) {
       return;
+    }
 
     const nextVideoOff =
       !videoOff;
@@ -1556,8 +2605,14 @@ export default function CallModal({
       }
     );
 
-    setVideoOff(nextVideoOff);
+    setVideoOff(
+      nextVideoOff
+    );
   }
+
+  // ============================================================
+  // FULLSCREEN
+  // ============================================================
 
   function toggleFullscreen() {
     const video =
@@ -1568,10 +2623,13 @@ export default function CallModal({
     if (
       document.fullscreenElement
     ) {
-      void document.exitFullscreen();
+      void document
+        .exitFullscreen();
+
       setRemoteVideoFullscreen(
         false
       );
+
       return;
     }
 
@@ -1586,27 +2644,39 @@ export default function CallModal({
           );
         })
         .catch(() => {
-          // Ignore fullscreen errors.
+          // Ignore.
         });
     }
   }
 
+  // ============================================================
+  // STATUS
+  // ============================================================
+
   const statusText = () => {
-    if (phase === "outgoing") {
+    if (
+      phase === "outgoing"
+    ) {
       return isVideo
         ? "Calling video…"
         : "Calling…";
     }
 
-    if (phase === "incoming") {
+    if (
+      phase === "incoming"
+    ) {
       return "Incoming call";
     }
 
-    if (phase === "connecting") {
+    if (
+      phase === "connecting"
+    ) {
       return "Connecting…";
     }
 
-    if (phase === "active") {
+    if (
+      phase === "active"
+    ) {
       return fmtDuration(
         duration
       );
@@ -1615,26 +2685,32 @@ export default function CallModal({
     return "Call ended";
   };
 
+  // ============================================================
+  // UI
+  // ============================================================
+
   return (
-    <div className="fixed inset-0 z-[60] overflow-hidden bg-[#202124] text-white">
+    <div className="fixed inset-0 z-[60] h-[100dvh] w-full overflow-hidden bg-[#202124] text-white touch-manipulation">
       {/* ====================================================== */}
       {/* REMOTE VIDEO STAGE */}
       {/* ====================================================== */}
 
       {isVideo &&
         phase === "active" && (
-          <div className="absolute inset-0 flex items-center justify-center bg-[#202124]">
+          <div className="absolute inset-0 flex items-center justify-center bg-black">
             <video
-              ref={remoteVideoRef}
+              ref={
+                remoteVideoRef
+              }
               autoPlay
               playsInline
-              className="h-full w-full object-contain md:object-cover"
+              className="h-full w-full object-contain bg-black md:object-cover"
             />
 
-            {/* Top bar */}
-            <div className="pointer-events-none absolute left-0 right-0 top-0 z-20 flex items-start justify-between bg-gradient-to-b from-black/60 to-transparent px-4 pb-16 pt-[max(16px,env(safe-area-inset-top))] md:px-8">
+            {/* TOP BAR */}
+            <div className="pointer-events-none absolute left-0 right-0 top-0 z-20 flex items-start justify-between bg-gradient-to-b from-black/70 to-transparent px-4 pb-16 pt-[max(16px,env(safe-area-inset-top))] md:px-8">
               <div className="pointer-events-auto flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-emerald-600 text-sm font-semibold shadow-lg">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-emerald-600 text-sm font-semibold shadow-lg">
                   {initials(
                     theirName
                   )}
@@ -1657,7 +2733,7 @@ export default function CallModal({
                 onClick={
                   toggleFullscreen
                 }
-                className="pointer-events-auto flex h-10 w-10 items-center justify-center rounded-full bg-black/40 backdrop-blur-md transition hover:bg-black/60"
+                className="pointer-events-auto flex h-10 w-10 items-center justify-center rounded-full bg-black/40 backdrop-blur-md transition hover:bg-black/60 active:scale-95"
                 title="Fullscreen"
                 aria-label="Fullscreen"
               >
@@ -1665,14 +2741,14 @@ export default function CallModal({
               </button>
             </div>
 
-            {/* Screen sharing indicator */}
+            {/* SCREEN SHARING INDICATOR */}
             {screenSharing && (
-              <div className="absolute left-1/2 top-5 z-30 -translate-x-1/2 rounded-full bg-black/60 px-4 py-2 text-xs font-medium backdrop-blur-md md:top-6">
+              <div className="absolute left-1/2 top-[max(16px,env(safe-area-inset-top))] z-30 mt-12 -translate-x-1/2 rounded-full bg-black/60 px-4 py-2 text-xs font-medium backdrop-blur-md">
                 You are sharing your screen
               </div>
             )}
 
-            {/* Local preview */}
+            {/* LOCAL PREVIEW */}
             <div className="absolute bottom-[112px] right-3 z-30 h-32 w-24 overflow-hidden rounded-xl border border-white/20 bg-[#3c4043] shadow-2xl sm:bottom-28 sm:right-5 sm:h-40 sm:w-32 md:h-44 md:w-56">
               {videoOff &&
               !screenSharing ? (
@@ -1689,7 +2765,9 @@ export default function CallModal({
                 </div>
               ) : (
                 <video
-                  ref={localVideoRef}
+                  ref={
+                    localVideoRef
+                  }
                   autoPlay
                   playsInline
                   muted
@@ -1699,7 +2777,7 @@ export default function CallModal({
 
               {screenSharing && (
                 <div className="absolute bottom-2 left-2 rounded-md bg-black/60 px-2 py-1 text-[10px]">
-                  Sharing
+                  Screen + camera
                 </div>
               )}
             </div>
@@ -1707,7 +2785,7 @@ export default function CallModal({
         )}
 
       {/* ====================================================== */}
-      {/* VOICE CALL / PRE-CALL STAGE */}
+      {/* VOICE / PRE-CALL STAGE */}
       {/* ====================================================== */}
 
       {(!isVideo ||
@@ -1783,10 +2861,10 @@ export default function CallModal({
       {/* ====================================================== */}
 
       <div className="absolute bottom-0 left-0 right-0 z-40">
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-36 bg-gradient-to-t from-black/80 to-transparent" />
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-36 bg-gradient-to-t from-black/90 via-black/50 to-transparent" />
 
-        <div className="relative flex justify-center px-3 pb-[max(18px,env(safe-area-inset-bottom))] pt-8 sm:px-5 md:justify-center md:pb-6">
-          <div className="flex max-w-full items-center gap-2 rounded-2xl bg-[#202124]/90 px-2 py-2 shadow-2xl backdrop-blur-xl sm:gap-3 sm:px-3">
+        <div className="relative flex justify-center px-2 pb-[max(14px,env(safe-area-inset-bottom))] pt-8 sm:px-5 md:pb-6">
+          <div className="flex max-w-[calc(100vw-16px)] items-center gap-1.5 overflow-x-auto rounded-2xl bg-[#202124]/95 px-2 py-2 shadow-2xl backdrop-blur-xl sm:gap-3 sm:px-3">
             {/* ================================================= */}
             {/* INCOMING */}
             {/* ================================================= */}
@@ -1800,7 +2878,7 @@ export default function CallModal({
                         "declined"
                       )
                     }
-                    className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-[#ea4335] text-white shadow-lg transition hover:bg-[#d93025] active:scale-95 sm:h-14 sm:w-14"
+                    className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-[#ea4335] text-white shadow-lg transition hover:bg-[#d93025] active:scale-95"
                     title="Decline"
                     aria-label="Decline call"
                   >
@@ -1814,7 +2892,7 @@ export default function CallModal({
                     disabled={
                       acceptStartedRef.current
                     }
-                    className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-[#34a853] text-white shadow-lg transition hover:bg-[#2d8f47] active:scale-95 disabled:opacity-50 sm:h-14 sm:w-14"
+                    className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-[#34a853] text-white shadow-lg transition hover:bg-[#2d8f47] active:scale-95 disabled:opacity-50"
                     title="Accept"
                     aria-label="Accept call"
                   >
@@ -1851,7 +2929,8 @@ export default function CallModal({
             {/* CONNECTING */}
             {/* ================================================= */}
 
-            {phase === "connecting" && (
+            {phase ===
+              "connecting" && (
               <div className="flex h-14 w-14 items-center justify-center">
                 <Loader2 className="h-7 w-7 animate-spin text-white" />
               </div>
@@ -1863,7 +2942,7 @@ export default function CallModal({
 
             {phase === "active" && (
               <>
-                {/* Microphone */}
+                {/* MICROPHONE */}
                 <button
                   onClick={
                     toggleMute
@@ -1891,7 +2970,7 @@ export default function CallModal({
                   )}
                 </button>
 
-                {/* Camera */}
+                {/* CAMERA */}
                 {isVideo && (
                   <button
                     onClick={
@@ -1924,7 +3003,7 @@ export default function CallModal({
                   </button>
                 )}
 
-                {/* Screen Share */}
+                {/* SCREEN SHARE */}
                 {isVideo && (
                   <button
                     onClick={() =>
@@ -1956,7 +3035,7 @@ export default function CallModal({
                   </button>
                 )}
 
-                {/* Speaker indicator */}
+                {/* SPEAKER */}
                 <div
                   className="hidden h-12 w-12 items-center justify-center rounded-full bg-[#3c4043] text-white sm:flex"
                   title="Speaker"
@@ -1965,14 +3044,14 @@ export default function CallModal({
                   <Volume2 className="h-5 w-5" />
                 </div>
 
-                {/* End */}
+                {/* END CALL */}
                 <button
                   onClick={() =>
                     void endCall(
                       "ended"
                     )
                   }
-                  className="ml-1 flex h-14 w-16 shrink-0 items-center justify-center rounded-full bg-[#ea4335] text-white shadow-lg transition hover:bg-[#d93025] active:scale-95 sm:h-14 sm:w-16"
+                  className="ml-1 flex h-14 w-16 shrink-0 items-center justify-center rounded-full bg-[#ea4335] text-white shadow-lg transition hover:bg-[#d93025] active:scale-95"
                   title="End call"
                   aria-label="End call"
                 >
@@ -2000,13 +3079,17 @@ export default function CallModal({
 
       {screenShareError &&
         phase === "active" && (
-          <div className="absolute bottom-28 left-1/2 z-50 w-[calc(100%-32px)] max-w-sm -translate-x-1/2 rounded-xl bg-black/80 px-4 py-3 text-center text-xs text-white shadow-xl backdrop-blur-md sm:bottom-32">
+          <div className="absolute bottom-28 left-1/2 z-50 w-[calc(100%-32px)] max-w-sm -translate-x-1/2 rounded-xl bg-black/85 px-4 py-3 text-center text-xs text-white shadow-xl backdrop-blur-md sm:bottom-32">
             {screenShareError}
           </div>
         )}
     </div>
   );
 }
+
+// ============================================================
+// FORMAT CALL DURATION
+// ============================================================
 
 function fmtDuration(
   seconds: number
@@ -2015,7 +3098,8 @@ function fmtDuration(
     seconds / 60
   );
 
-  const sec = seconds % 60;
+  const sec =
+    seconds % 60;
 
   return `${m}:${sec
     .toString()
