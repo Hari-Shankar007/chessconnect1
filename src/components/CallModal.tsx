@@ -120,6 +120,7 @@ export default function CallModal({
     useRef<MediaStreamAudioDestinationNode | null>(null);
 
   const screenAnimationFrameRef = useRef<number | null>(null);
+  const screenVideoFrameCallbackRef = useRef<number | null>(null);
 
   const screenVideoElementRef = useRef<HTMLVideoElement | null>(null);
   const cameraVideoElementRef = useRef<HTMLVideoElement | null>(null);
@@ -264,8 +265,26 @@ export default function CallModal({
       }
 
       // --------------------------------------------------------
-      // STOP CANVAS ANIMATION
+      // STOP CANVAS FRAME CALLBACK / ANIMATION
       // --------------------------------------------------------
+
+      if (screenVideoFrameCallbackRef.current !== null) {
+        if (
+          screenVideoElementRef.current &&
+          "cancelVideoFrameCallback" in
+            screenVideoElementRef.current
+        ) {
+          try {
+            screenVideoElementRef.current.cancelVideoFrameCallback(
+              screenVideoFrameCallbackRef.current
+            );
+          } catch {
+            // Ignore.
+          }
+        }
+
+        screenVideoFrameCallbackRef.current = null;
+      }
 
       if (screenAnimationFrameRef.current !== null) {
         cancelAnimationFrame(
@@ -555,7 +574,7 @@ export default function CallModal({
           );
         };
 
-        const drawFrame = () => {
+        const renderFrame = () => {
           if (endedRef.current) {
             return;
           }
@@ -676,14 +695,73 @@ export default function CallModal({
             pipWidth,
             pipHeight
           );
-
-          screenAnimationFrameRef.current =
-            requestAnimationFrame(
-              drawFrame
-            );
         };
 
-        drawFrame();
+        const scheduleNextFrame = () => {
+          if (endedRef.current) {
+            return;
+          }
+
+          const currentScreenStream =
+            screenStreamRef.current;
+
+          const currentScreenTrack =
+            currentScreenStream?.getVideoTracks()[0];
+
+          if (
+            !currentScreenStream ||
+            !currentScreenTrack ||
+            currentScreenTrack.readyState !==
+              "live"
+          ) {
+            renderFrame();
+            return;
+          }
+
+          /*
+           * IMPORTANT:
+           *
+           * requestAnimationFrame() is tied to the
+           * ChessConnect page's rendering loop. When the
+           * user switches to another tab/window, browsers
+           * can throttle or pause that loop. The result is
+           * a frozen canvas track even though screen audio
+           * keeps flowing.
+           *
+           * requestVideoFrameCallback() is driven by the
+           * captured screen video's actual video frames, so
+           * it is much more reliable for background-tab
+           * screen sharing.
+           */
+          if (
+            "requestVideoFrameCallback" in
+            screenVideo
+          ) {
+            screenVideoFrameCallbackRef.current =
+              screenVideo.requestVideoFrameCallback(
+                () => {
+                  screenVideoFrameCallbackRef.current =
+                    null;
+
+                  renderFrame();
+                  scheduleNextFrame();
+                }
+              );
+          } else {
+            // Older browsers: keep the previous fallback.
+            screenAnimationFrameRef.current =
+              requestAnimationFrame(() => {
+                screenAnimationFrameRef.current =
+                  null;
+
+                renderFrame();
+                scheduleNextFrame();
+              });
+          }
+        };
+
+        renderFrame();
+        scheduleNextFrame();
 
         if (!canvas.captureStream) {
           throw new Error(
@@ -1098,8 +1176,30 @@ export default function CallModal({
         );
 
         // ------------------------------------------------------
-        // STOP ANIMATION
+        // STOP FRAME CALLBACK / ANIMATION
         // ------------------------------------------------------
+
+        if (
+          screenVideoFrameCallbackRef.current !==
+          null
+        ) {
+          if (
+            screenVideoElementRef.current &&
+            "cancelVideoFrameCallback" in
+              screenVideoElementRef.current
+          ) {
+            try {
+              screenVideoElementRef.current.cancelVideoFrameCallback(
+                screenVideoFrameCallbackRef.current
+              );
+            } catch {
+              // Ignore.
+            }
+          }
+
+          screenVideoFrameCallbackRef.current =
+            null;
+        }
 
         if (
           screenAnimationFrameRef.current !==
@@ -1332,8 +1432,30 @@ export default function CallModal({
     }
 
     // ----------------------------------------------------------
-    // STOP CANVAS
+    // STOP CANVAS FRAME CALLBACK / ANIMATION
     // ----------------------------------------------------------
+
+    if (
+      screenVideoFrameCallbackRef.current !==
+      null
+    ) {
+      if (
+        screenVideoElementRef.current &&
+        "cancelVideoFrameCallback" in
+          screenVideoElementRef.current
+      ) {
+        try {
+          screenVideoElementRef.current.cancelVideoFrameCallback(
+            screenVideoFrameCallbackRef.current
+          );
+        } catch {
+          // Ignore.
+        }
+      }
+
+      screenVideoFrameCallbackRef.current =
+        null;
+    }
 
     if (
       screenAnimationFrameRef.current !==
