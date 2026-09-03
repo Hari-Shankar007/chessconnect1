@@ -59,6 +59,11 @@ export default function CallModal({
   const [videoOff, setVideoOff] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Keep this declaration above every hook/effect that uses it.
+  // Declaring it near the bottom of the component causes a production
+  // "Cannot access before initialization" error after minification.
+  const isVideo = callType === "video";
+
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
@@ -1224,9 +1229,6 @@ export default function CallModal({
 
     setVideoOff(nextVideoOff);
   }
-
-  const isVideo =
-    callType === "video";
 
   return (
     <div className="fixed inset-0 z-[60] flex flex-col items-center justify-center bg-slate-900">
