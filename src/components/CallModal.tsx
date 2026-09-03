@@ -62,6 +62,7 @@ export default function CallModal({
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const remoteStreamRef = useRef<MediaStream | null>(null);
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -160,10 +161,14 @@ export default function CallModal({
     }
 
     if (localVideoRef.current) {
+      localVideoRef.current.onloadedmetadata = null;
       localVideoRef.current.srcObject = null;
     }
 
+    remoteStreamRef.current = null;
+
     if (remoteVideoRef.current) {
+      remoteVideoRef.current.onloadedmetadata = null;
       remoteVideoRef.current.srcObject = null;
     }
 
@@ -338,18 +343,35 @@ export default function CallModal({
 
   /**
    * Attach remote media.
+   *
+   * Keep the stream in a ref because the <video> element is only
+   * mounted after the call becomes active. Without this, ontrack can
+   * fire while the ref is still null and the remote video is lost.
    */
   const attachRemoteStream = useCallback(
     (stream: MediaStream) => {
-      if (callTypeRef.current === "video") {
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = stream;
+      remoteStreamRef.current = stream;
 
-          remoteVideoRef.current
-            .play()
-            .catch(() => {
-              // Browser may require interaction.
+      if (callTypeRef.current === "video") {
+        const video = remoteVideoRef.current;
+
+        if (video) {
+          video.srcObject = stream;
+
+          const playVideo = () => {
+            video.play().catch((error) => {
+              console.warn(
+                "Remote video autoplay/playback was blocked:",
+                error
+              );
             });
+          };
+
+          if (video.readyState >= HTMLMediaElement.HAVE_METADATA) {
+            playVideo();
+          } else {
+            video.onloadedmetadata = playVideo;
+          }
         }
       } else {
         if (remoteAudioRef.current) {
@@ -464,17 +486,9 @@ export default function CallModal({
 
       localStreamRef.current = stream;
 
-      if (
-        localVideoRef.current &&
-        callType === "video"
-      ) {
-        localVideoRef.current.srcObject = stream;
-
-        localVideoRef.current
-          .play()
-          .catch(() => {});
-      }
-
+      // The local <video> element is mounted only after the call
+      // becomes active. Keep the stream in the ref and attach it
+      // from the media-element effect below.
       const pc = new RTCPeerConnection({
         iceServers: ICE_SERVERS,
       });
@@ -489,11 +503,10 @@ export default function CallModal({
 
       pc.ontrack = (event) => {
         const remoteStream =
-          event.streams?.[0];
+          event.streams?.[0] ??
+          new MediaStream([event.track]);
 
-        if (remoteStream) {
-          attachRemoteStream(remoteStream);
-        }
+        attachRemoteStream(remoteStream);
       };
 
       const callerIce: string[] = [];
@@ -643,17 +656,9 @@ export default function CallModal({
 
       localStreamRef.current = stream;
 
-      if (
-        localVideoRef.current &&
-        incomingCall.call_type === "video"
-      ) {
-        localVideoRef.current.srcObject = stream;
-
-        localVideoRef.current
-          .play()
-          .catch(() => {});
-      }
-
+      // The local <video> element is mounted only after the call
+      // becomes active. Keep the stream in the ref and attach it
+      // from the media-element effect below.
       const pc =
         new RTCPeerConnection({
           iceServers: ICE_SERVERS,
@@ -669,11 +674,10 @@ export default function CallModal({
 
       pc.ontrack = (event) => {
         const remoteStream =
-          event.streams?.[0];
+          event.streams?.[0] ??
+          new MediaStream([event.track]);
 
-        if (remoteStream) {
-          attachRemoteStream(remoteStream);
-        }
+        attachRemoteStream(remoteStream);
       };
 
       const calleeIce: string[] = [];
@@ -1056,6 +1060,64 @@ export default function CallModal({
   ]);
 
   // ============================================================
+  // ATTACH MEDIA ELEMENTS
+  // ============================================================
+  //
+  // The video elements are rendered only when phase === "active".
+  // WebRTC can deliver ontrack before React has mounted those
+  // elements, so attach the streams whenever the active UI mounts.
+  //
+  useEffect(() => {
+    if (!isVideo || phase !== "active") return;
+
+    const localStream = localStreamRef.current;
+    const localVideo = localVideoRef.current;
+
+    if (localStream && localVideo) {
+      localVideo.srcObject = localStream;
+      localVideo.muted = true;
+
+      localVideo.play().catch((error) => {
+        console.warn(
+          "Local video autoplay/playback was blocked:",
+          error
+        );
+      });
+    }
+
+    const remoteStream = remoteStreamRef.current;
+    const remoteVideo = remoteVideoRef.current;
+
+    if (remoteStream && remoteVideo) {
+      remoteVideo.srcObject = remoteStream;
+
+      const playRemoteVideo = () => {
+        remoteVideo.play().catch((error) => {
+          console.warn(
+            "Remote video autoplay/playback was blocked:",
+            error
+          );
+        });
+      };
+
+      if (
+        remoteVideo.readyState >=
+        HTMLMediaElement.HAVE_METADATA
+      ) {
+        playRemoteVideo();
+      } else {
+        remoteVideo.onloadedmetadata = playRemoteVideo;
+      }
+    }
+
+    return () => {
+      if (remoteVideo) {
+        remoteVideo.onloadedmetadata = null;
+      }
+    };
+  }, [isVideo, phase]);
+
+  // ============================================================
   // CLEANUP ON UNMOUNT
   // ============================================================
 
@@ -1317,4 +1379,3 @@ function fmtDuration(s: number): string {
     .toString()
     .padStart(2, "0")}`;
 }
-
